@@ -1,0 +1,69 @@
+# Builds the firmware variants and the EBiCS Setup Android APK.
+# The APK is attached to every run as the artifact "EBiCS-Setup-apk" (Actions tab -> run -> Artifacts).
+name: Android APK
+
+on:
+  push:
+    branches: [master, 'feature/**']
+    tags: ['v*']
+    paths-ignore: ['**.md']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # firmware version from git describe
+
+      # same compiler as System Workbench (Ac6) on the desktop: identical code size
+      - uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '7-2018-q2'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build firmware variants
+        run: python setup_app/build_variants.py --out android_app/assets/firmware
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: '3.50.0'
+          cache: true
+
+      - name: Packages
+        working-directory: android_app
+        run: flutter pub get
+
+      - name: Analyze and test
+        working-directory: android_app
+        run: |
+          flutter analyze
+          flutter test
+
+      - name: Build APK
+        working-directory: android_app
+        run: |
+          flutter build apk --release --build-number=${{ github.run_number }}
+          mv build/app/outputs/flutter-apk/app-release.apk "build/EBiCS-Setup-$(git describe --always --tags).apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EBiCS-Setup-apk
+          path: android_app/build/EBiCS-Setup-*.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware-variants
+          path: android_app/assets/firmware/
