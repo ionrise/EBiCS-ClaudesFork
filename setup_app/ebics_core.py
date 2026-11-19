@@ -534,11 +534,11 @@ def build_firmware(settings, log=print, root=None):
     for f in make_dir.iterdir():
         if f.is_file():
             shutil.copy2(f, debug_dir / f.name)
-    for sub in ("Drivers/STM32F1xx_HAL_Driver/Src", "startup", "Src"):
+    for sub in ("Drivers/STM32F1xx_HAL_Driver/Src", "Startup", "Src"):  # case matters on Linux (CI)
         (debug_dir / sub).mkdir(parents=True, exist_ok=True)
     shutil.copy2(debug_dir / "subdir_drivers.mk", debug_dir / "Drivers/STM32F1xx_HAL_Driver/Src/subdir.mk")
     shutil.copy2(debug_dir / "subdir_src.mk", debug_dir / "Src/subdir.mk")
-    shutil.copy2(debug_dir / "subdir_startup.mk", debug_dir / "startup/subdir.mk")
+    shutil.copy2(debug_dir / "subdir_startup.mk", debug_dir / "Startup/subdir.mk")
     shutil.copy2(debug_dir / "STLINK_FLASH.ld", root / "STM32F103C6Tx_FLASH.ld")
     shutil.copy2(debug_dir / "STLINK_system_stm32f1xx.c", root / "Src/system_stm32f1xx.c")
     log("compiling ...")

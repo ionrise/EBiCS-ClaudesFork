@@ -1,3 +1,7 @@
+import 'dart:async';
+
+import 'package:flutter/gestures.dart' show kTouchSlop;
+import 'package:flutter/services.dart';
 import 'package:material_ui/material_ui.dart';
 
 import '../firmware/bike_settings.dart';
@@ -193,7 +197,7 @@ class _FieldEditorState extends State<FieldEditor> {
           },
         ),
     };
-    return Padding(
+    final row = Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(children: [
         Expanded(child: editor),
@@ -201,7 +205,109 @@ class _FieldEditorState extends State<FieldEditor> {
           IconButton(icon: const Icon(Icons.help_outline), tooltip: 'Help', onPressed: _help),
       ]),
     );
+    if (f.help.isEmpty) return row;
+    return HoldHelp(title: f.label.trim(), text: f.unit.isEmpty ? f.help : '${f.help}\n(unit: ${f.unit})', child: row);
   }
+}
+
+/// Shows a floating explanation above [child] while the finger is held on it (about half a second),
+/// and hides it when the finger is lifted or moves away. Works on top of text fields and switches,
+/// because it only listens to raw pointer events and never takes part in the gesture arena.
+class HoldHelp extends StatefulWidget {
+  final String title;
+  final String text;
+  final Widget child;
+  final Duration delay;
+  const HoldHelp(
+      {super.key, required this.title, required this.text, required this.child, this.delay = const Duration(milliseconds: 450)});
+  @override
+  State<HoldHelp> createState() => HoldHelpState();
+}
+
+class HoldHelpState extends State<HoldHelp> {
+  OverlayEntry? _entry;
+  Timer? _timer;
+  Offset? _down;
+
+  bool get showing => _entry != null;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _hide();
+    super.dispose();
+  }
+
+  void _hide() {
+    _entry?.remove();
+    _entry = null;
+  }
+
+  void _cancel() {
+    _timer?.cancel();
+    _timer = null;
+    _down = null;
+    _hide();
+  }
+
+  void _show() {
+    if (!mounted || _entry != null) return;
+    final box = context.findRenderObject() as RenderBox?;
+    final overlay = Overlay.maybeOf(context);
+    if (box == null || overlay == null || !box.attached) return;
+    final overlayBox = overlay.context.findRenderObject() as RenderBox;
+    final topLeft = box.localToGlobal(Offset.zero, ancestor: overlayBox);
+    final size = box.size;
+    final screen = overlayBox.size;
+    final theme = Theme.of(context);
+    HapticFeedback.selectionClick();
+    // above the setting if there is room (finger is below), else below it
+    final above = topLeft.dy > screen.height * 0.3;
+    _entry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: 12,
+        right: 12,
+        top: above ? null : topLeft.dy + size.height + 4,
+        bottom: above ? screen.height - topLeft.dy + 4 : null,
+        child: IgnorePointer(
+          child: Material(
+            elevation: 8,
+            color: theme.colorScheme.inverseSurface,
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(widget.title,
+                    style: theme.textTheme.titleSmall
+                        ?.copyWith(color: theme.colorScheme.onInverseSurface, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                Text(widget.text,
+                    style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onInverseSurface)),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(_entry!);
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (e) {
+          _cancel();
+          _down = e.position;
+          _timer = Timer(widget.delay, _show);
+        },
+        onPointerMove: (e) {
+          // scrolling the list: not a hold
+          if (_down != null && (e.position - _down!).distance > kTouchSlop && _entry == null) _cancel();
+        },
+        onPointerUp: (_) => _cancel(),
+        onPointerCancel: (_) => _cancel(),
+        child: widget.child,
+      );
 }
 
 Future<bool> confirm(BuildContext context, String title, String text, {String yes = 'Continue'}) async {
