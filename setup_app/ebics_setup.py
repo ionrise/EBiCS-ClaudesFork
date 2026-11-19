@@ -1060,7 +1060,8 @@ class WizardPage(Page):
                     btn.state(["!disabled"])
                     return
                 self.polling = True
-                self.cal = {"t0": time.time(), "stopped_since": None, "last_halls": None, "phase": 0}
+                self.cal = {"t0": time.time(), "stopped_since": None, "last_halls": None, "phase": 0,
+                            "fails": 0, "ever_ok": False, "lost_box": None}
                 self.poll_calibration(st, bar, detail, btn)
 
             def kick():
@@ -1083,16 +1084,30 @@ class WizardPage(Page):
         def show(snap):
             if not self.polling:
                 return
-            if not isinstance(snap, dict):
-                detail.configure(text="(no answer from the controller this time, retrying ...)")
-                self.after(500, lambda: self.poll_calibration(st, bar, detail, btn))
+            if not isinstance(snap, dict) or snap.get("ui8_setup_state") is None:
+                # the motor current often disturbs the ST-Link (cheap clones drop off USB): the calibration
+                # keeps running on the controller, so keep trying and let the user reconnect
+                self.cal["fails"] += 1
+                err = self.app.stlink.last_error or "no answer"
+                if self.cal["fails"] >= 3:
+                    self._show_lost_box(st, bar, detail, btn, err)
+                else:
+                    detail.configure(text=f"(no answer from the controller this time: {err} - retrying ...)")
+                self.after(2000, lambda: self.poll_calibration(st, bar, detail, btn))
                 return
+            self.cal["fails"] = 0
+            self.cal["ever_ok"] = True
+            if self.cal.get("lost_box"):
+                self.cal["lost_box"].destroy()
+                self.cal["lost_box"] = None
             state, prog = snap.get("ui8_setup_state"), snap.get("ui8_setup_progress") or 0
             halls = snap.get("ui32_hall_events")
             if state == 0:
                 if time.time() - self.cal["t0"] > 8:
-                    st.configure(text="The controller did not start the calibration.", foreground=BAD)
-                    detail.configure(text="Is the motor running (throttle/pedals)? Release everything and try again.")
+                    st.configure(text="The controller did not start the calibration (or it restarted).", foreground=BAD)
+                    detail.configure(text="Is the motor running (throttle/pedals)? Release everything and try again. "
+                                          "If the ST-Link lost the connection, the controller may have restarted from a "
+                                          "voltage dip: check the battery and try again.")
                     btn.state(["!disabled"])
                     self.polling = False
                     return
@@ -1134,8 +1149,39 @@ class WizardPage(Page):
                     self.cal["manual_btn"] = ttk.Button(self.body, text="The wheel has stopped", command=manual)
                     self.cal["manual_btn"].pack(anchor="w", pady=6)
             self.cal["last_halls"] = halls
-            self.after(300, lambda: self.poll_calibration(st, bar, detail, btn))
+            # gentle polling while current flows (each read reconnects the ST-Link), faster while coasting
+            self.after(1000 if state in (1, 2) else 600, lambda: self.poll_calibration(st, bar, detail, btn))
         self.app.bg(self.app.live.snapshot, show)
+
+    def _show_lost_box(self, st, bar, detail, btn, err):
+        gone = self.app.stlink.probe_lost()
+        st.configure(text="Connection to the ST-Link lost - the calibration keeps running on the controller.",
+                     foreground=WARN)
+        detail.configure(text=f"Last error: {err}")
+        if self.cal.get("lost_box"):
+            return
+        box = ttk.Frame(self.body, style="Page.TFrame")
+        box.pack(anchor="w", fill="x", pady=(8, 0))
+        self.cal["lost_box"] = box
+        steps = ["Don't switch the controller off and keep clear of the wheel.",
+                 "Wait until the wheel has stopped (up to a few minutes).",
+                 ("Unplug the ST-Link from USB and plug it in again (it dropped off USB)." if gone else
+                  "If it doesn't come back by itself, unplug and replug the ST-Link."),
+                 "Click 'Reconnect and check result'. The app also keeps trying every 2 seconds."]
+        for s_ in steps:
+            ttk.Label(box, text="•  " + s_, style="Big.TLabel", wraplength=px(740), justify="left").pack(anchor="w", padx=(10, 0))
+        ttk.Label(box, text="This is caused by the motor current disturbing the ST-Link. It helps to: connect only "
+                            "SWDIO, SWCLK and GND (no 3.3 V), keep the wires short and twisted with GND, run the "
+                            "controller from the battery, use a laptop on battery or a USB isolator, put a ferrite on "
+                            "the USB cable.", style="Muted.TLabel", wraplength=px(740), justify="left").pack(anchor="w", pady=(6, 0))
+
+        def check_now():
+            self.cal["fails"] = 0
+            self.cal["stopped_since"] = None
+            self.cal["last_halls"] = None
+            st.configure(text="Checking ...", foreground=MUTED)
+            self.app.bg(self.app.live.snapshot, lambda s: None)   # wakes the ST-Link; the poll loop shows the result
+        ttk.Button(box, text="Reconnect and check result", style="Accent.TButton", command=check_now).pack(anchor="w", pady=8)
 
     def cal_done(self, snap, st, detail):
         ang = core.hall_angles_deg(snap) if isinstance(snap, dict) else None
