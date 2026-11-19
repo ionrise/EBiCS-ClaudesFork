@@ -4,10 +4,11 @@
 
 | Controller | Chip | Firmware | Set up with |
 |---|---|---|---|
-| **Lishui** (LSW) | STM32F103 | EBiCS (field oriented control) | PC setup app or **Android app** |
+| **Lishui** (LSW) | STM32F103 | EBiCS (field oriented control) | PC setup app, **Android app**, or **any phone's browser with an ESP32-C3** |
 | **Kunteng** (KT S06S, S12S, KT36/48 ...) | STM8S105 | open source KT firmware (casainho's, with bug fixes) | PC setup app *(coming in the next version, see [Kunteng](#kunteng-controllers))* |
 
-Both are programmed with the same cheap **ST-Link V2**.
+Both are programmed with the same cheap **ST-Link V2**. Lishui controllers can also be set up **wirelessly** with a
+3 EUR **ESP32-C3** board instead of the ST-Link (see [ESP32-C3 wireless flasher](#esp32-c3-wireless-flasher)).
 
 A fork of [EBiCS/EBiCS_Firmware](https://github.com/EBiCS/EBiCS_Firmware), the open source FOC firmware for
 Lishui e-bike controllers (STM32F103). For Lishui this fork adds a **simple setup app with a step-by-step first-setup
@@ -22,6 +23,7 @@ and an **Android app** that does the whole setup from a phone with an ST-Link V2
 
 - [What's different from upstream](#whats-different-from-upstream)
 - [Android app (setup from a phone)](#android-app-setup-from-a-phone)
+- [ESP32-C3 wireless flasher](#esp32-c3-wireless-flasher)
 - [Kunteng controllers](#kunteng-controllers)
 - [What you need](#what-you-need)
 - [Wiring the ST-Link](#wiring-the-st-link)
@@ -149,6 +151,17 @@ back); with a desktop build it offers to install its own.
 The phone app is for **Lishui** controllers. Kunteng controllers are set up with the PC app (below).
 
 Build: see [android_app/README.md](android_app/README.md).
+
+## ESP32-C3 wireless flasher
+
+`esp32_flasher/` turns an ESP32-C3 board (ESP32-C3 SuperMini, Lolin C3 Mini ...) into a wireless replacement for the
+ST-Link. It opens a Wi-Fi hotspot (**EBiCS-Flasher**, password **ebics1234**) with a web page: open it in any
+phone's browser (Android or iPhone, no app), and the ESP installs EBiCS over SWD by itself - same wizard, settings,
+live data and calibration as the apps. All firmware variants are inside the ESP, so no internet is needed.
+
+Wiring: **GPIO4 = SWCLK (green), GPIO5 = SWDIO (black), GND = GND (yellow)**; don't connect the red 3.3 V wire, power
+the ESP from USB. The ready-made ESP image is built by GitHub Actions (artifact *EBiCS-Flasher-ESP32C3*, write it at
+address 0x0). Details: [esp32_flasher/README.md](esp32_flasher/README.md). For Lishui controllers only.
 
 ## Kunteng controllers
 

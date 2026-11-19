@@ -8,7 +8,12 @@ Src/FOC.c \
 Src/display_bafang.c \
 Src/display_kingmeter.c \
 Src/display_kunteng.c \
-build/display_No_2.c \
+Src/display_ebics.c \
+Src/display_tongsheng.c \
+Src/display_vesc.c \
+Src/sensorless.c \
+Src/settings.c \
+Src/display_No_2.c \
 Src/eeprom.c \
 Src/main.c \
 Src/print.c \
@@ -21,6 +26,11 @@ build/FOC.o \
 build/display_bafang.o \
 build/display_kingmeter.o \
 build/display_kunteng.o \
+build/display_ebics.o \
+build/display_tongsheng.o \
+build/display_vesc.o \
+build/sensorless.o \
+build/settings.o \
 build/display_No_2.o \
 build/eeprom.o \
 build/main.o \
@@ -34,6 +44,11 @@ build/FOC.d \
 build/display_bafang.d \
 build/display_kingmeter.d \
 build/display_kunteng.d \
+build/display_ebics.d \
+build/display_tongsheng.d \
+build/display_vesc.d \
+build/sensorless.d \
+build/settings.d \
 build/display_No_2.d \
 build/eeprom.d \
 build/main.d \

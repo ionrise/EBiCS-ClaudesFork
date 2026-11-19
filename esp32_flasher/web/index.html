@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EBiCS Flasher</title>
+<style>
+:root { --bg:#10141a; --card:#1b222c; --line:#2c3644; --text:#e6edf3; --muted:#8b98a8; --accent:#3b82f6;
+        --ok:#3fb950; --bad:#f85149; --warn:#d29922; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+header { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid var(--line); }
+header img { width:44px; height:44px; border-radius:10px; background:#fff; }
+header h1 { font-size:19px; margin:0; flex:1; }
+#chip { font-size:13px; padding:4px 10px; border-radius:99px; background:var(--card); color:var(--muted); }
+#chip.ok { color:var(--ok); } #chip.bad { color:var(--bad); }
+nav { display:flex; border-bottom:1px solid var(--line); }
+nav button { flex:1; background:none; border:0; color:var(--muted); padding:12px 4px; font-size:15px; border-bottom:2px solid transparent; }
+nav button.on { color:var(--text); border-bottom-color:var(--accent); }
+main { padding:16px; max-width:720px; margin:0 auto; }
+.page { display:none; } .page.on { display:block; }
+h2 { font-size:20px; margin:4px 0 10px; }
+p { margin:0 0 10px; } .muted { color:var(--muted); font-size:14px; }
+ul { margin:0 0 10px; padding-left:20px; }
+.btn { background:var(--accent); color:#fff; border:0; border-radius:10px; padding:11px 16px; font-size:15px; margin:4px 6px 4px 0; }
+.btn.alt { background:var(--card); color:var(--text); border:1px solid var(--line); }
+.btn:disabled { opacity:.45; }
+.status { padding:10px 12px; border-radius:10px; background:var(--card); margin:10px 0; white-space:pre-line; }
+.status.ok { color:var(--ok); } .status.bad { color:var(--bad); } .status.warn { color:var(--warn); } .status.busy { color:var(--accent); }
+.bar { height:8px; background:var(--card); border-radius:4px; overflow:hidden; margin:8px 0; }
+.bar div { height:100%; width:0; background:var(--accent); transition:width .3s; }
+.field { display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--line); position:relative; }
+.field label { flex:1; }
+.field input[type=number], .field input[type=text], .field select { width:150px; background:var(--card); color:var(--text);
+  border:1px solid var(--line); border-radius:8px; padding:8px; font-size:15px; }
+.field input[type=checkbox] { width:22px; height:22px; }
+.field .unit { color:var(--muted); font-size:13px; width:34px; }
+.help { background:none; border:1px solid var(--line); color:var(--muted); border-radius:50%; width:26px; height:26px; }
+#bubble { position:fixed; left:12px; right:12px; z-index:9; background:#e6edf3; color:#111; border-radius:12px;
+  padding:12px 14px; box-shadow:0 8px 24px rgba(0,0,0,.5); display:none; pointer-events:none; }
+#bubble b { display:block; margin-bottom:4px; }
+.steps { display:flex; justify-content:space-between; gap:6px; margin:16px 0 4px; }
+.steps button:last-child { margin-right:0; }
+.tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
+.tile { background:var(--card); border-radius:10px; padding:10px; }
+.tile .l { color:var(--muted); font-size:12px; } .tile .v { font-size:22px; font-weight:600; } .tile .u { color:var(--muted); font-size:12px; }
+textarea { width:100%; height:120px; background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:8px; }
+pre.log { background:#0d1117; color:#d6deeb; padding:8px; border-radius:8px; max-height:260px; overflow:auto; font-size:12px; white-space:pre-wrap; }
+.check { display:flex; gap:10px; align-items:center; padding:6px 0; }
+.check input { width:22px; height:22px; }
+.sub { padding-left:14px; }
+</style>
+</head>
+<body>
+<header>
+  <img src="data:image/png;base64,{{LOGO}}" alt="EBiCS">
+  <h1>EBiCS Flasher</h1>
+  <span id="chip">...</span>
+</header>
+<nav>
+  <button data-p="setup" class="on">Setup</button><button data-p="settings">Settings</button><button data-p="live">Live</button><button data-p="tools">Tools</button>
+</nav>
+<main>
+  <section class="page on" id="p-setup"></section>
+  <section class="page" id="p-settings">
+    <p class="muted">Hold a setting to see what it means. Settings are kept in this browser.</p>
+    <div id="form"></div>
+    <div class="status" id="setStatus" style="display:none"></div>
+    <button class="btn alt" id="btnSave">Save</button>
+    <button class="btn" id="btnWrite">Write to controller</button>
+    <details style="margin-top:14px"><summary class="muted">Profile (same JSON as my_bike.json of the desktop app)</summary>
+      <textarea id="profile"></textarea>
+      <button class="btn alt" id="btnExport">Show current</button><button class="btn alt" id="btnImport">Load from text</button>
+      <button class="btn alt" id="btnReset">Reset to defaults</button>
+    </details>
+  </section>
+  <section class="page" id="p-live">
+    <div class="status" id="liveStatus">...</div>
+    <div class="tiles" id="tiles"></div>
+    <div class="status" id="halls" style="display:none"></div>
+  </section>
+  <section class="page" id="p-tools">
+    <button class="btn alt" id="tCheck">Check connection</button>
+    <button class="btn alt" id="tUnlock">Unlock chip (erases flash)</button>
+    <button class="btn alt" id="tInstall">Install firmware</button>
+    <button class="btn alt" id="tRestart">Restart controller</button>
+    <p class="muted" style="margin-top:12px">Install your own firmware .bin (e.g. a desktop build, starts at 0x08000000, max 30464 bytes):</p>
+    <input type="file" id="tFile" accept=".bin"> <button class="btn alt" id="tUpload">Upload and install</button>
+    <div class="bar"><div id="tBar"></div></div>
+    <pre class="log" id="tLog"></pre>
+    <p class="muted" id="fwver"></p>
+  </section>
+</main>
+<div id="bubble"><b></b><span></span></div>
+<script src="settings_block.js"></script>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => { const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) { if (k === "class") e.className = v; else if (k.startsWith("on")) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v); }
+  for (const k of kids) e.append(k); return e; };
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ------------------------------------------------------------ state
+let S = EB.defaults();
+try { const t = localStorage.getItem("ebics_bike"); if (t) S = Object.assign(EB.defaults(), JSON.parse(t)); } catch (e) {}
+const saveLocal = () => { try { localStorage.setItem("ebics_bike", JSON.stringify(S)); } catch (e) {} };
+let INFO = {};
+let VARIANTS = [];
+const variantName = s => S.display.toLowerCase() + "_" + (EB.B(s, "sensorless") ? "sensorless" : "hall");
+
+// ------------------------------------------------------------ api
+async function api(path, opts = {}) {
+  const r = await fetch(path, Object.assign({ cache: "no-store" }, opts));
+  let j = {}; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+const post = (path, params) => api(path, { method: "POST", body: new URLSearchParams(params) });
+async function info() {
+  try { INFO = await api("/api/info"); } catch (e) { INFO = { connected: false, error: e.message }; }
+  const c = $("#chip");
+  c.className = INFO.connected ? "ok" : "bad";
+  c.textContent = INFO.busy ? "working ..." : INFO.connected ? (INFO.locked ? "locked chip" : "connected") : "no controller";
+  return INFO;
+}
+function describe(i) {
+  if (!i.connected) return "The controller does not answer.\n- is it switched on (battery)?\n- GND connected? (Lishui plug: BLACK = SWDIO -> GPIO5, " +
+    "YELLOW = GND, GREEN = SWCLK -> GPIO4)\n- try swapping SWDIO and SWCLK" + (i.error ? "\n(" + i.error + ")" : "");
+  return "Connected: " + i.chip + ", " + i.flashKb + " KB flash" + (i.supported ? "" : "\nWARNING: unexpected chip, EBiCS needs an STM32F103C6/C8.") +
+    (i.locked ? "\nThe chip is locked (original firmware)." : "") +
+    (i.installed ? "\nFirmware: " + i.installed : "");
+}
+// waits for the background job, reports progress
+async function waitJob(onStep) {
+  for (;;) {
+    await sleep(400);
+    let j; try { j = await api("/api/job"); } catch (e) { continue; }
+    onStep && onStep(j);
+    if (!j.busy && j.done) { if (!j.ok) throw new Error(j.error || "failed"); return j; }
+  }
+}
+async function install(onStep) {
+  const name = variantName(S);
+  if (!VARIANTS.find(v => v.name === name)) throw new Error("no prebuilt firmware for " + name);
+  await post("/api/install", { variant: name, block: EB.hex(EB.buildBlock(S)) });
+  return waitJob(onStep);
+}
+async function writeSettings(onStep) {
+  await post("/api/settings", { block: EB.hex(EB.buildBlock(S)) });
+  return waitJob(onStep);
+}
+const live = () => api("/api/live");
+
+// ------------------------------------------------------------ hold for explanation
+const bubble = $("#bubble");
+function holdHelp(node, title, text) {
+  let timer = null, x0 = 0, y0 = 0;
+  const hide = () => { clearTimeout(timer); timer = null; bubble.style.display = "none"; };
+  node.addEventListener("pointerdown", e => { x0 = e.clientX; y0 = e.clientY; clearTimeout(timer);
+    timer = setTimeout(() => { const r = node.getBoundingClientRect();
+      bubble.querySelector("b").textContent = title; bubble.querySelector("span").textContent = text;
+      bubble.style.display = "block";
+      const above = r.top > window.innerHeight * 0.3;
+      bubble.style.top = above ? "" : (r.bottom + 6) + "px"; bubble.style.bottom = above ? (window.innerHeight - r.top + 6) + "px" : "";
+      if (navigator.vibrate) navigator.vibrate(10); }, 450); });
+  node.addEventListener("pointermove", e => { if (bubble.style.display !== "block" && Math.hypot(e.clientX - x0, e.clientY - y0) > 10) hide(); });
+  ["pointerup", "pointercancel", "pointerleave"].forEach(ev => node.addEventListener(ev, hide));
+  node.addEventListener("contextmenu", e => e.preventDefault());
+}
+
+// ------------------------------------------------------------ settings form
+function fieldRow(f, s, onChange) {
+  const [key, label, kind, , , unit, help] = f;
+  let input;
+  const opts = list => { const sel = el("select"); for (const [l, v] of list) sel.append(el("option", { value: String(v) }, l)); return sel; };
+  if (kind === "bool") { input = el("input", { type: "checkbox" }); input.checked = EB.B(s, key); input.onchange = () => onChange(key, input.checked); }
+  else if (kind === "display") { input = opts(EB.DISPLAYS.map(([k, l]) => [l, k])); input.value = s.display; input.onchange = () => onChange(key, input.value); }
+  else if (kind === "battery") { input = opts(EB.BATTERIES); input.value = String(EB.I(s, key)); input.onchange = () => onChange(key, parseInt(input.value)); }
+  else if (kind === "wheel") { input = opts(EB.WHEELS.map(([n]) => [n, n])); input.value = s.wheel; input.onchange = () => onChange(key, input.value); }
+  else if (kind === "speedtemp") { input = opts(EB.SPEED_TEMP); input.value = String(EB.I(s, key)); input.onchange = () => onChange(key, parseInt(input.value)); }
+  else {
+    input = el("input", { type: kind === "str" ? "text" : "number", step: kind === "float" ? "0.1" : "1", inputmode: kind === "str" ? "text" : "decimal" });
+    input.value = s[key];
+    input.oninput = () => { const t = input.value.trim().replace(",", ".");
+      if (kind === "int") { const v = parseInt(t); if (!isNaN(v)) onChange(key, v); }
+      else if (kind === "float") { const v = parseFloat(t); if (!isNaN(v)) onChange(key, v); }
+      else onChange(key, t); };
+  }
+  const row = el("div", { class: "field" + (label.startsWith("  ") ? " sub" : "") }, el("label", {}, label.trim()), input, el("span", { class: "unit" }, unit));
+  if (help) { row.append(el("button", { class: "help", type: "button", onclick: () => alert(label.trim() + "\n\n" + help) }, "?")); holdHelp(row, label.trim(), help); }
+  return row;
+}
+function visible(key, s) {
+  switch (key) {
+    case "wheel_mm": return s.wheel === "custom";
+    case "speed_on_wire": case "temp_on_wire": case "speed_temp_threshold": return EB.I(s, "speed_temp_input") !== 0;
+    case "ntc_pullup_ohm": return EB.I(s, "speed_temp_input") !== 0 && EB.B(s, "temp_on_wire");
+    case "pulses_per_rev": return EB.B(s, "speed_sensor_external");
+    case "frac_high": case "frac_low": return EB.B(s, "dirdet");
+    case "ts_coef": return EB.B(s, "torque_sensor");
+  }
+  return true;
+}
+function renderForm(target, s, keys, onChange) {
+  target.innerHTML = "";
+  const rerenderKeys = ["wheel", "speed_temp_input", "temp_on_wire", "speed_sensor_external", "dirdet", "torque_sensor"];
+  for (const f of EB.FIELDS) {
+    if (f[4] === "hidden" || (keys && !keys.includes(f[0])) || !visible(f[0], s)) continue;
+    if (!keys && (target.lastSection !== f[4])) { target.append(el("h2", {}, { basic: "Basic", advanced: "Advanced", expert: "Expert (sensorless motor)" }[f[4]])); target.lastSection = f[4]; }
+    target.append(fieldRow(f, s, (k, v) => { s[k] = v; onChange && onChange(); if (rerenderKeys.includes(k)) renderForm(target, s, keys, onChange); }));
+  }
+  target.lastSection = undefined;
+}
+function setStatus(node, text, tone) { node.style.display = text ? "block" : "none"; node.className = "status " + (tone || ""); node.textContent = text; }
+
+renderForm($("#form"), S, null);
+$("#btnSave").onclick = () => { const p = EB.problems(S); if (p.length) return alert(p.join("\n\n")); saveLocal(); setStatus($("#setStatus"), "Saved in this browser.", "ok"); };
+$("#btnWrite").onclick = async () => {
+  const p = EB.problems(S); if (p.length) return alert(p.join("\n\n"));
+  saveLocal(); const st = $("#setStatus"); const b = $("#btnWrite"); b.disabled = true;
+  try {
+    setStatus(st, "Connecting ...", "busy"); const i = await info();
+    if (!i.connected) throw new Error(describe(i));
+    if (i.installed === variantName(S)) { await writeSettings(j => setStatus(st, j.step + " ...", "busy")); setStatus(st, "Settings written, controller restarted.", "ok"); }
+    else {
+      if (!confirm((i.installed ? "Display or motor type changed" : "The controller does not run firmware from this flasher") +
+        ": install the firmware with these settings? (The motor calibration is kept.)")) { setStatus(st, "Nothing written.", ""); return; }
+      await install(j => setStatus(st, j.step + " ... " + j.progress + " %", "busy")); setStatus(st, "Firmware installed with these settings.", "ok");
+    }
+  } catch (e) { setStatus(st, "Failed: " + e.message, "bad"); } finally { b.disabled = false; info(); }
+};
+$("#btnExport").onclick = () => { $("#profile").value = JSON.stringify(S, null, 2); };
+$("#btnImport").onclick = () => { try { S = Object.assign(EB.defaults(), JSON.parse($("#profile").value)); renderForm($("#form"), S, null); alert("Loaded - check it, then Save."); } catch (e) { alert("Not a valid profile: " + e.message); } };
+$("#btnReset").onclick = () => { if (confirm("Reset all settings to the defaults?")) { S = EB.defaults(); renderForm($("#form"), S, null); } };
+
+// ------------------------------------------------------------ live data
+let liveOn = false;
+function hallText(m) {
+  const names = ["Hall_45", "Hall_51", "Hall_13", "Hall_32", "Hall_26", "Hall_64"];
+  if (names.some(n => m[n] === undefined)) return null;
+  const a = names.map(n => m[n] * 360 / 4294967296), sorted = [...a].sort((x, y) => x - y);
+  const good = sorted.every((x, i) => { const g = ((sorted[(i + 1) % 6] - x) % 360 + 360) % 360; return g >= 35 && g <= 85; });
+  return ["Hall angles: " + a.map(x => Math.round(x) + "°").join(", ") + (good ? "  (good, about 60° apart)" : "  (unusual spacing - calibrate again)"), good];
+}
+function speedKmh(m, s) {
+  if ((m.uint16_full_rotation_counter ?? 8000) >= 8000 || !(m["MS.Speed"] > 0)) return 0;
+  const t = m["MS.Speed"] * 6 * Math.max(1, EB.I(s, "gear_ratio")) / 500000;
+  return EB.wheelCircumference(s) / 1000 / t * 3.6;
+}
+async function livePoll() {
+  if (!liveOn) return;
+  try {
+    const m = await live();
+    const s = S, calV = EB.I(s, "cal_v"), st = EB.I(s, "speed_temp_input");
+    const thr = m.ui16_throttle || 0, off = m.ui16_throttle_offset || 0, span = Math.max(1, EB.I(s, "throttle_max") - off);
+    const T = [["Battery", ((m["MS.Voltage"] || 0) * calV / 1000).toFixed(1), "V"], ["Speed", speedKmh(m, s).toFixed(1), "km/h"],
+      ["Assist level", m["MS.assist_level"], ""], ["Throttle", Math.max(0, Math.min(100, Math.floor((thr - off) * 100 / span))) + " (" + thr + ")", "%"],
+      ["Brake", m.brake_flag ? "PRESSED" : "off", ""], ["Motor current", ((m["MS.i_q"] || 0) * 38 / 1000).toFixed(1), "A"],
+      ["Battery current", ((m["MS.Battery_Current"] || 0) / 1000).toFixed(1), "A"], ["Pedal pulses", m.ui32_pas_events, ""],
+      ["Hall events", m.ui32_hall_events, ""], ["Controller temp", m["MS.int_Temperature"], "°C"],
+      ["Motor calibrated", EB.B(s, "sensorless") ? "not needed" : (m.ui8_hall_calibrated ? "yes" : "NO"), ""], ["KV", m.ui32_KV, ""],
+      ["Motor temp", st && EB.B(s, "temp_on_wire") ? m["MS.Temperature"] : "no sensor", "°C"], ["Speed/temp wire (raw)", st ? m["adc" + st] : "not used", "ADC"],
+      ["Last reset", m.ui8_watchdog_reset ? "WATCHDOG" : "normal", ""],
+      ["Settings used", { 1: "from flasher", 0: "built in", 2: "REJECTED" }[m.ui8_settings_source] ?? "-", ""]];
+    $("#tiles").innerHTML = "";
+    for (const [l, v, u] of T) $("#tiles").append(el("div", { class: "tile" }, el("div", { class: "l" }, l), el("div", { class: "v" }, String(v ?? "-")), el("div", { class: "u" }, u)));
+    setStatus($("#liveStatus"), "connected  " + new Date().toLocaleTimeString() + "  (" + m.variant + ")", "ok");
+    const h = hallText(m); if (h) setStatus($("#halls"), h[0], h[1] ? "ok" : "warn");
+  } catch (e) { setStatus($("#liveStatus"), e.message, "bad"); await sleep(1500); }
+  setTimeout(livePoll, 500);
+}
+
+// ------------------------------------------------------------ tools
+const tlog = t => { const l = $("#tLog"); l.textContent += t + "\n"; l.scrollTop = 1e9; };
+const tbar = p => { $("#tBar").style.width = p + "%"; };
+async function tool(name, f) { tlog("--- " + name); try { await f(); } catch (e) { tlog("ERROR: " + e.message); } info(); }
+const progressLog = () => { let last = ""; return j => { if (j.step !== last) tlog(j.step); last = j.step; tbar(j.progress); }; };
+$("#tCheck").onclick = () => tool("check connection", async () => tlog(describe(await info())));
+$("#tUnlock").onclick = () => { if (!confirm("Unlocking erases the whole flash, including the original firmware.\nThis cannot be undone. Continue?")) return;
+  tool("unlock", async () => { await post("/api/unlock", { confirm: "erase" }); await waitJob(progressLog()); tlog("unlocked - switch the controller off and on again"); }); };
+$("#tInstall").onclick = () => { const p = EB.problems(S); if (p.length) return alert(p.join("\n\n"));
+  if (!confirm("Install the firmware for " + variantName(S) + " with the current settings? The motor calibration is kept.")) return;
+  tool("install", async () => { await install(progressLog()); tlog("installed, verified, controller restarted"); }); };
+$("#tRestart").onclick = () => tool("restart", async () => { await post("/api/restart", {}); tlog("restarted"); });
+$("#tUpload").onclick = () => { const f = $("#tFile").files[0]; if (!f) return alert("Choose a .bin file first.");
+  if (!confirm("Install " + f.name + " (" + f.size + " bytes)? The motor calibration is kept; the settings block is erased, so the firmware uses its built-in config.h values.")) return;
+  tool("upload " + f.name, async () => { const fd = new FormData(); fd.append("file", f, f.name);
+    await api("/api/upload", { method: "POST", body: fd }); await waitJob(progressLog()); tlog("installed, verified, controller restarted"); }); };
+
+// ------------------------------------------------------------ setup wizard
+const W = { i: 0, done: false, changed: false, timer: null, base: null };
+const steps = [];
+const step = (title, render) => steps.push({ title, render });
+function nav(next) { clearTimeout(W.timer); W.timer = null; W.i = Math.max(0, Math.min(steps.length - 1, next)); W.done = false; renderStep(); }
+function setDone(d) { W.done = d; const n = $("#wNext"); if (n) n.disabled = !d; const k = $("#wSkip"); if (k) k.style.display = d ? "none" : ""; }
+function renderStep() {
+  const p = $("#p-setup"), st = steps[W.i];
+  p.innerHTML = "";
+  p.append(el("p", { class: "muted" }, "Step " + (W.i + 1) + " of " + steps.length), el("h2", {}, st.title));
+  const body = el("div"); p.append(body);
+  const last = W.i === steps.length - 1;
+  const bar = el("div", { class: "steps" },
+    el("div", {}, el("button", { class: "btn alt", onclick: () => nav(W.i - 1) }, "Back"), el("button", { class: "btn alt", onclick: () => nav(W.i) }, "Retry")),
+    el("div", {}, el("button", { class: "btn alt", id: "wSkip", onclick: () => go(true) }, "Skip"),
+      el("button", { class: "btn", id: "wNext", onclick: () => go(false) }, last ? "Start again" : "Next")));
+  p.append(bar);
+  if (W.i === 0) bar.firstChild.firstChild.disabled = true;
+  if (last) $("#wSkip").style.display = "none";
+  setDone(false);
+  st.render(body);
+}
+async function go(skip) {
+  const st = steps[W.i];
+  if (!skip && st.beforeNext && !(await st.beforeNext())) return;
+  if (W.i === steps.length - 1) return nav(0);
+  let n = W.i + 1;
+  if (steps[n].title === "Update the settings" && !W.changed) n++;
+  nav(n);
+}
+const S_ = (body, text, tone) => { const d = el("div", { class: "status " + (tone || "") }, text); body.append(d); return d; };
+const P_ = (body, text, cls) => body.append(el("p", cls ? { class: cls } : {}, text));
+const UL_ = (body, items) => body.append(el("ul", {}, ...items.map(t => el("li", {}, t))));
+const B_ = (body, text, f, alt) => { const b = el("button", { class: "btn" + (alt ? " alt" : ""), onclick: f }, text); body.append(b); return b; };
+const BAR_ = body => { const b = el("div", { class: "bar" }, el("div")); body.append(b); return p => { b.firstChild.style.width = p + "%"; }; };
+
+step("First setup", body => {
+  P_(body, "This guides you through everything, one step at a time. You need:");
+  UL_(body, ["This ESP32-C3 wired to the controller's programming plug: GPIO4 = SWCLK (green), GPIO5 = SWDIO (black), GND = GND (yellow). " +
+    "Don't connect the red 3.3 V wire. Power the ESP from USB (power bank).", "The controller connected to the motor and switched on from the battery",
+    "The wheel lifted off the ground, so it can spin freely", "About 10 minutes"]);
+  P_(body, "The motor calibration (hall angles, KV) in the last 2 KB of the chip is never erased.", "muted");
+  setDone(true);
+});
+step("Connect", body => {
+  P_(body, "Switch the controller on. This page checks every 2 seconds.");
+  const st = S_(body, "Checking ...", "busy");
+  const check = async () => { const i = await info(); st.textContent = describe(i); st.className = "status " + (i.connected ? "ok" : "bad");
+    setDone(!!i.connected); if (!i.connected && steps[W.i].title === "Connect") W.timer = setTimeout(check, 2000); };
+  check();
+});
+step("Unlock the chip", body => {
+  const st = S_(body, "Reading the chip protection ...", "busy");
+  (async () => {
+    const i = await info();
+    if (!i.connected) { st.textContent = describe(i); st.className = "status bad"; return; }
+    if (!i.locked) { st.textContent = "The chip is unlocked - nothing to do."; st.className = "status ok"; return setDone(true); }
+    st.textContent = "The chip is locked (original Lishui firmware)."; st.className = "status warn";
+    P_(body, "To install EBiCS the chip must be unlocked once. This ERASES the original firmware for good - it cannot be backed up or restored.");
+    const cb = el("input", { type: "checkbox" }); body.append(el("label", { class: "check" }, cb, "I understand the original firmware will be erased"));
+    const bar = BAR_(body);
+    const b = B_(body, "Unlock chip", async () => {
+      if (!cb.checked) return alert("Tick the box first.");
+      b.disabled = true;
+      try { await post("/api/unlock", { confirm: "erase" }); await waitJob(j => { st.textContent = j.step + " ..."; st.className = "status busy"; bar(j.progress); });
+        st.textContent = "Unlocked. Now switch the controller OFF and ON again, then tap Next."; st.className = "status ok"; setDone(true);
+      } catch (e) { st.textContent = "Unlock failed: " + e.message + "\nCheck wiring and power, then tap Retry."; st.className = "status bad"; b.disabled = false; }
+    });
+  })();
+});
+step("Your bike", body => {
+  P_(body, "A few questions. Hold a setting (or tap ?) to see what it means. You can change all of this later in Settings.");
+  const form = el("div"); body.append(form);
+  const draft = Object.assign({}, S);
+  renderForm(form, draft, ["display", "battery", "full_voltage_v", "voltage_min_v", "wheel", "wheel_mm", "speed_limit", "phase_current_a",
+    "battery_current_a", "pas_magnets", "torque_sensor", "throttle", "legal_mode", "sensorless", "speed_temp_input", "speed_on_wire", "temp_on_wire", "ntc_pullup_ohm"]);
+  steps[W.i].beforeNext = async () => { const p = EB.problems(draft); if (p.length) { alert(p.join("\n\n")); return false; }
+    S = draft; saveLocal(); renderForm($("#form"), S, null); return true; };
+  setDone(true);
+});
+step("Install the firmware", body => {
+  P_(body, "The firmware for your display is installed on the controller with your settings. This takes about a minute. The motor calibration stays.");
+  const st = S_(body, "Connecting ...", "busy"), bar = BAR_(body);
+  (async () => {
+    try { const i = await info(); if (!i.connected) throw new Error(describe(i));
+      await install(j => { st.textContent = j.step + " ... " + j.progress + " %"; bar(j.progress); });
+      st.textContent = "Firmware installed (" + variantName(S) + ")."; st.className = "status ok"; bar(100); setDone(true);
+    } catch (e) { st.textContent = "Installing failed: " + e.message + "\nCheck the wiring and that the controller is on, then Retry."; st.className = "status bad"; }
+  })();
+});
+step("Motor calibration", body => {
+  if (EB.B(S, "sensorless")) { P_(body, "Sensorless motor: there are no hall sensors to calibrate. Test with the wheel lifted, low current first."); return setDone(true); }
+  P_(body, "The controller now finds the position of the motor's hall sensors and measures the motor. Before you start:");
+  const cbs = ["The wheel is lifted and can spin freely", "Nothing touches the wheel, chain or pedals", "Hands and cables are away from the wheel"]
+    .map(t => { const c = el("input", { type: "checkbox" }); body.append(el("label", { class: "check" }, c, t)); return c; });
+  const b = B_(body, "Start calibration", () => start());
+  const st = S_(body, "", ""), bar = BAR_(body), det = el("p", { class: "muted" }); body.append(det);
+  st.style.display = "none";
+  let t0 = 0, stopped = null, lastHalls = null;
+  async function start() {
+    if (!cbs.every(c => c.checked)) return alert("Please confirm all three points first.");
+    b.disabled = true; setStatus(st, "Starting ...", "busy");
+    try { const m = await live(); if (m.ui32_setup_magic !== 0xEB1C5002) throw new Error("old firmware on the controller - go back and install the firmware");
+      await post("/api/calibrate", {}); t0 = Date.now(); stopped = null; lastHalls = null; poll();
+    } catch (e) { setStatus(st, "Could not start: " + e.message, "bad"); b.disabled = false; }
+  }
+  async function poll() {
+    if (steps[W.i].title !== "Motor calibration") return;
+    let m; try { m = await live(); } catch (e) { det.textContent = "(no answer from the controller this time, retrying ...)"; W.timer = setTimeout(poll, 500); return; }
+    const s = m.ui8_setup_state, pr = m.ui8_setup_progress || 0, halls = m.ui32_hall_events;
+    if (s === 0) { if (Date.now() - t0 > 8000) { setStatus(st, "The controller did not start the calibration.", "bad"); det.textContent = "Is the motor running (throttle/pedals)? Release everything and tap Retry."; b.disabled = false; return; } }
+    else if (s === 1) { setStatus(st, "1/2  Finding the hall sensor positions ...", "busy"); det.textContent = "The motor turns slowly and may click or buzz - that is normal. About 6 seconds."; bar(pr); }
+    else if (s === 2) { setStatus(st, "2/2  Measuring the motor speed ...", "busy"); det.textContent = "The wheel speeds up to full speed. This can take a few minutes. Keep clear of the wheel."; bar(pr); }
+    else if (s === 4) { const n = [0, 1, 2, 3, 4, 5].filter(i => (m.ui8_setup_halls_found >> i) & 1).length;
+      setStatus(st, "Calibration failed: not all hall sensor positions were found.", "bad");
+      det.textContent = "Found " + n + " of 6. Check the hall sensor plug (5 thin wires) and that the wheel can turn freely, then switch the controller off and on and tap Retry."; b.disabled = false; return; }
+    else if (s === 3) { bar(100);
+      if (halls === lastHalls) stopped = stopped || Date.now(); else stopped = null;
+      if (stopped && Date.now() - stopped > 1500) { const h = hallText(m); setStatus(st, "Calibration done, the wheel has stopped.", "ok");
+        det.textContent = (h ? h[0] : "") + (m.ui32_KV ? "\nMotor KV value: " + m.ui32_KV : ""); return setDone(true); }
+      setStatus(st, "Measured. Please wait until the wheel has stopped ...", "warn"); det.textContent = "Don't touch the wheel - it is still coasting."; }
+    lastHalls = halls; W.timer = setTimeout(poll, 300);
+  }
+});
+step("Motor direction", body => {
+  P_(body, EB.B(S, "sensorless") || !EB.B(S, "throttle") ? "Give the motor a short spin (throttle, or turn the pedals with the wheel lifted). Which way did the wheel turn?"
+    : "During the calibration the wheel spun up. Which way did it turn?");
+  const st = S_(body, "", ""); st.style.display = "none";
+  B_(body, "Forward (correct)", () => { setStatus(st, "Direction is correct.", "ok"); setDone(true); });
+  B_(body, "Backward", () => { S.reverse = !EB.B(S, "reverse"); saveLocal(); W.changed = true;
+    setStatus(st, "OK - the direction will be reversed. The settings are written to the controller in a moment.", "warn"); setDone(true); }, true);
+});
+step("Measure the motor gearing", body => {
+  if (EB.B(S, "sensorless")) { P_(body, "Without hall sensors the gearing can't be measured by turning the wheel. Enter 'Pole pairs x gear ratio' in Settings."); return setDone(true); }
+  P_(body, "This makes the speed on the display correct. Put a mark on the tyre (e.g. at the valve).");
+  UL_(body, ["Tap 'Start measuring'", "Turn the wheel slowly BACKWARDS by hand, exactly 3 full turns", "Tap 'Done'"]);
+  P_(body, "(Backwards, because geared hub motors freewheel when the wheel turns forward.)", "muted");
+  let start = null;
+  const st = S_(body, "Current value: " + EB.I(S, "gear_ratio") + "   (you can also skip this step)", "");
+  B_(body, "Start measuring", async () => { try { start = (await live()).ui32_hall_events; setStatus(st, "Measuring - turn the wheel backwards 3 full turns, then tap Done.", "busy"); done.disabled = false; }
+    catch (e) { setStatus(st, "No connection to the controller: " + e.message, "bad"); } });
+  const done = B_(body, "Done", async () => {
+    try { const ev = ((await live()).ui32_hall_events - start) >>> 0, ratio = Math.round(ev / 18);
+      if (ratio < 4) return setStatus(st, "Only " + ev + " hall events counted - did the motor turn? Try again (turn backwards, not forwards).", "bad");
+      if (ratio !== EB.I(S, "gear_ratio")) { S.gear_ratio = ratio; saveLocal(); W.changed = true; }
+      setStatus(st, "Measured: " + ratio + "  (" + ev + " hall events in 3 turns). Saved.", "ok"); setDone(true);
+    } catch (e) { setStatus(st, "No connection to the controller: " + e.message, "bad"); } }, true);
+  done.disabled = true;
+});
+step("Update the settings", body => {
+  P_(body, "Your answers changed the settings (direction or gearing), so they are written to the controller.");
+  const st = S_(body, "Writing the settings ...", "busy");
+  writeSettings().then(() => { W.changed = false; setStatus(st, "Settings written, controller restarted. The motor calibration is kept.", "ok"); setDone(true); })
+    .catch(e => setStatus(st, "Writing the settings failed: " + e.message, "bad"));
+});
+step("Test", body => {
+  P_(body, "Try each item. It gets a tick when the controller sees it. (Wheel still lifted!)");
+  const items = { display: "Display: change the assist level on the display", throttle: "Throttle: twist it - the wheel should turn",
+    brake: "Brake: pull a brake lever", pas: "Pedal sensor: turn the pedals forward by hand" };
+  if (!EB.B(S, "throttle")) delete items.throttle;
+  const rows = {}; for (const [k, t] of Object.entries(items)) { rows[k] = el("div", { class: "check" }, "○  " + t); body.append(rows[k]); }
+  const st = S_(body, "Waiting for input ...", ""); const seen = new Set(); W.base = null;
+  P_(body, "If something doesn't get a tick, you can still finish and check it later in Live.", "muted");
+  setDone(true);
+  (async function poll() {
+    if (steps[W.i].title !== "Test") return;
+    try { const m = await live(); const b = W.base = W.base || m;
+      if (m["MS.assist_level"] !== b["MS.assist_level"]) seen.add("display");
+      if ((m.ui16_throttle || 0) > (m.ui16_throttle_offset || 0) + 150) seen.add("throttle");
+      if (m.brake_flag) seen.add("brake");
+      if ((m.ui32_pas_events || 0) - (b.ui32_pas_events || 0) > 4) seen.add("pas");
+      for (const k in rows) if (seen.has(k)) { rows[k].textContent = "✔  " + items[k]; rows[k].style.color = "var(--ok)"; }
+      const all = Object.keys(items).every(k => seen.has(k)); setStatus(st, all ? "All good!" : "Waiting for input ...", all ? "ok" : "");
+    } catch (e) { setStatus(st, "No connection to the controller ...", "bad"); }
+    W.timer = setTimeout(poll, 300);
+  })();
+});
+step("Finished", body => {
+  P_(body, "Your controller is set up. Lower the wheel and go for a careful test ride.");
+  UL_(body, ["Change power, speed limit and more later in Settings, then 'Write to controller'", "Live shows what the controller sees",
+    "If you change the motor or swap wires, run this setup again"]);
+  setDone(true);
+});
+
+// ------------------------------------------------------------ tabs, start
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".page").forEach(p => p.classList.toggle("on", p.id === "p-" + b.dataset.p));
+  liveOn = b.dataset.p === "live"; if (liveOn) livePoll();
+});
+(async () => {
+  try { const v = await api("/api/variants"); VARIANTS = v.variants; $("#fwver").textContent = "Firmware in this flasher: " + v.version + ", " + VARIANTS.length + " variants"; } catch (e) {}
+  info(); renderStep();
+})();
+</script>
+</body>
+</html>

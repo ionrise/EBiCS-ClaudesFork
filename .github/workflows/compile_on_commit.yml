@@ -1,58 +1,50 @@
+# Compiles the firmware with the committed Inc/config.h on every push and pull request.
+#
+# 1. ST-Link build (make/, the layout this fork uses): must pass. Artifacts: .hex/.bin/.elf.
+# 2. Lishui UART bootloader build (root makefile, app at 0x08001000, max 26368 bytes, .lsh file for the
+#    original Lishui bootloader): informational only. The EBiCS firmware of this fork is bigger than the
+#    26 KB the UART bootloader leaves, so this step usually reports "region FLASH overflowed".
 name: Compile on Commit
 
 on:
   push:
-    branches: [ master ]
-  # Allows you to run this workflow manually from the Actions tab
+    branches: [master]
+  pull_request:
   workflow_dispatch:
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-    env:
-      # ruleid: allowed-unsecure-commands
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v3
-    - name: log untrusted output
-      run: |
+      - uses: actions/checkout@v4
 
-        # disable command workflow processing
-        echo "::stop-commands::`echo -n ${{ github.token }} | sha256sum | head -c 64`"
+      # same compiler as System Workbench (Ac6) on the desktop
+      - uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '7-2018-q2'
 
-        # log untrusted output
-        echo "untrusted output"
+      - name: ST-Link build (config.h as committed)
+        run: |
+          mkdir -p Debug/Src Debug/Startup Debug/Drivers/STM32F1xx_HAL_Driver/Src
+          cp make/* Debug/
+          cp Debug/subdir_src.mk Debug/Src/subdir.mk
+          cp Debug/subdir_startup.mk Debug/Startup/subdir.mk
+          cp Debug/subdir_drivers.mk Debug/Drivers/STM32F1xx_HAL_Driver/Src/subdir.mk
+          cd Debug && make -j4 all
+          mkdir -p ../artifacts/stlink && cp LishuiFOC_01.hex LishuiFOC_01.bin LishuiFOC_01.elf ../artifacts/stlink/
 
-        # enable workflow command processing
-        echo "::`echo -n ${{ github.token }} | sha256sum | head -c 64`::"
-    - name: Create folder
-      run: |
-        mkdir build 
-        ls ${{ github.workspace }}
-    - name: arm-none-eabi-gcc
-      uses: fiam/arm-none-eabi-gcc@v1.0.2
-      with:
-        release: '9-2020-q2'
-    - name: make
-      run: make
-      
-    - name: Install srecord
-      run: |
-        sudo apt-get update
-        sudo apt-get install srecord
-        
-    - name: Install java
-      uses: actions/setup-java@v3
-      with:
-        distribution: 'temurin' # See 'Supported distributions' for available options
-        java-version: '17'
-    - run: java -cp java make/hexToLsh.java
-    
-    - name: 'Upload Artifact'
-      uses: actions/upload-artifact@v4
-      with:
-        path: ${{ github.workspace }}/output
-        name: EBiCS_build_${{ github.run_number }}
-        retention-days: 10
+      - name: UART bootloader build (informational, usually too big)
+        continue-on-error: true
+        run: |
+          mkdir -p build
+          make -j4
+          sudo apt-get install -y srecord
+          java make/hexToLsh.java          # writes output/EBiCS_Firmware.lsh
+          mkdir -p artifacts/uart-bootloader && cp output/* build/EBiCS_Firmware.hex artifacts/uart-bootloader/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: EBiCS_build_${{ github.run_number }}
+          path: artifacts/
+          retention-days: 10
