@@ -1,18 +1,28 @@
 # EBiCS-ClaudesFork
 
+**Open source firmware and easy setup tools for Lishui and Kunteng e-bike controllers.**
+
+| Controller | Chip | Firmware | Set up with |
+|---|---|---|---|
+| **Lishui** (LSW) | STM32F103 | EBiCS (field oriented control) | PC setup app or **Android app** |
+| **Kunteng** (KT S06S, S12S, KT36/48 ...) | STM8S105 | open source KT firmware (casainho's, with bug fixes) | PC setup app *(coming in the next version, see [Kunteng](#kunteng-controllers))* |
+
+Both are programmed with the same cheap **ST-Link V2**.
+
 A fork of [EBiCS/EBiCS_Firmware](https://github.com/EBiCS/EBiCS_Firmware), the open source FOC firmware for
-Lishui e-bike controllers (STM32F103). This fork adds a **simple setup app with a step-by-step first-setup
+Lishui e-bike controllers (STM32F103). For Lishui this fork adds a **simple setup app with a step-by-step first-setup
 wizard**, fixes a number of **firmware bugs**, adds **two more display protocols**, an experimental
 **sensorless** mode, **speed + motor temperature on one wire**, **custom battery voltages with soft current ramps**,
 and an **Android app** that does the whole setup from a phone with an ST-Link V2 on USB OTG.
 
-> Use at your own risk, like upstream EBiCS. Unlocking the chip erases the original Lishui firmware for good.
+> Use at your own risk, like upstream EBiCS. Unlocking the chip erases the original factory firmware for good.
 > Test with the wheel lifted before riding.
 
 ## Contents
 
 - [What's different from upstream](#whats-different-from-upstream)
 - [Android app (setup from a phone)](#android-app-setup-from-a-phone)
+- [Kunteng controllers](#kunteng-controllers)
 - [What you need](#what-you-need)
 - [Wiring the ST-Link](#wiring-the-st-link)
 - [First setup, step by step](#first-setup-step-by-step)
@@ -136,7 +146,25 @@ Not possible from the phone: the Expert control-loop settings (PI gains, PLL, AD
 calibration from the phone need firmware installed by the phone (it recognises its own builds by reading the flash
 back); with a desktop build it offers to install its own.
 
+The phone app is for **Lishui** controllers. Kunteng controllers are set up with the PC app (below).
+
 Build: see [android_app/README.md](android_app/README.md).
+
+## Kunteng controllers
+
+Kunteng (KT) controllers - S06S (6 MOSFET, up to 15 A), S12S (12 MOSFET, up to 25 A), KT36/48 and similar -
+have an STM8S105 chip instead of an STM32. EBiCS doesn't run on them, so they get the open source KT firmware
+(casainho's, with bug fixes) instead. **Support for them is being added to the PC setup app and comes in the next
+version of this repository.** How it works:
+
+- Start `EBiCS Setup.bat` and choose **Kunteng** on the first page (Lishui is the other choice).
+- Wire the ST-Link V2 to the 4 pin header on the KT board: **3.3V, SWIM, GND, RST**. The ST-Link talks to the
+  STM8 over the SWIM pin; no other programmer or software (STVP) is needed.
+- The app asks for the controller type (6 or 12 MOSFET), battery cells, motor current, speed limit, wheel size,
+  assist levels ..., builds the firmware with the free **SDCC** compiler and installs it.
+- Unlocking the chip the first time erases the original KT firmware for good (no backup possible).
+- Displays: **KT LCD3 / LCD5** (KT protocol). Speed limit and wheel size set on the display win over the app.
+
 
 ## What you need
 
