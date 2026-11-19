@@ -31,6 +31,7 @@ const EB = (() => {
     ["torque_sensor", "Torque sensor", "bool", false, "basic", "", "On if you have a torque sensor instead of a plain cadence PAS sensor."],
     ["throttle", "Throttle", "bool", true, "basic", "", "On if a throttle is connected."],
     ["legal_mode", "Legal mode (EU)", "bool", false, "basic", "", "Ramps the motor down at the speed limit and limits to 6 km/h when you don't pedal."],
+    ["current_ramp_ms", "Current ramp", "int", 300, "basic", "ms", "Time to rise from zero to the full motor current: smoother take-off, easier on gears and freewheel. The current drops immediately when you release the throttle or brake. 0 = no ramp."],
     ["walk_current_a", "Walk assist current", "float", 6.0, "basic", "A", "Motor current for the walk / push assist button."],
     ["sensorless", "Sensorless motor (no hall sensors) - experimental", "bool", false, "basic", "", "Run the motor without hall sensors. Hall calibration and gearing measurement are not possible. Test carefully."],
     ["reverse", "Reverse motor direction", "bool", false, "basic", "", "On if the wheel turns backwards. The setup asks you and sets this."],
@@ -121,7 +122,7 @@ const EB = (() => {
     "wheel_circumference", "gear_ratio", "pas_imp_per_turn", "pulses_per_revolution", "pushassist_current", "ts_coef", "pas_timeout",
     "ramp_end", "throttle_offset", "throttle_max", "motor_temp_threshold", "motor_temp_max", "frac_high", "frac_low", "reverse",
     "speed_temp_adc", "speed_temp_threshold", "ntc_pullup_ohm", "obs_inductance", "obs_resistance", "obs_flux_linkage", "obs_gamma",
-    "obs_angle_offset"];
+    "obs_angle_offset", "current_ramp_ms"];
 
   function values(s) {
     const calI = cInt(S(s, "cal_i"), 38);
@@ -156,6 +157,7 @@ const EB = (() => {
       ntc_pullup_ohm: tempFromWire ? atLeast1(has(s, "ntc_pullup_ohm") ? I(s, "ntc_pullup_ohm") : 3000) : 0,
       obs_inductance: cInt(S(s, "inductance"), 0), obs_resistance: cInt(S(s, "resistance"), 0),
       obs_flux_linkage: cInt(S(s, "flux_linkage"), 0), obs_gamma: cInt(S(s, "gamma"), 0), obs_angle_offset: angle,
+      current_ramp_ms: Math.max(0, Math.min(10000, has(s, "current_ramp_ms") ? I(s, "current_ramp_ms") : 300)),
     };
     bars.forEach((mv, n) => { v["battery_level_" + (n + 1)] = mv * 10; });
     return [flags, v];

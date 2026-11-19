@@ -363,7 +363,7 @@ step("Your bike", body => {
   const form = el("div"); body.append(form);
   const draft = Object.assign({}, S);
   renderForm(form, draft, ["display", "battery", "full_voltage_v", "voltage_min_v", "wheel", "wheel_mm", "speed_limit", "phase_current_a",
-    "battery_current_a", "pas_magnets", "torque_sensor", "throttle", "legal_mode", "sensorless", "speed_temp_input", "speed_on_wire", "temp_on_wire", "ntc_pullup_ohm"]);
+    "battery_current_a", "pas_magnets", "torque_sensor", "throttle", "legal_mode", "current_ramp_ms", "sensorless", "speed_temp_input", "speed_on_wire", "temp_on_wire", "ntc_pullup_ohm"]);
   steps[W.i].beforeNext = async () => { const p = EB.problems(draft); if (p.length) { alert(p.join("\n\n")); return false; }
     S = draft; saveLocal(); renderForm($("#form"), S, null); return true; };
   setDone(true);
