@@ -683,6 +683,7 @@ LIVE_VARS = {
     "ui8_setup_state": ("u8", 0),
     "ui8_setup_progress": ("u8", 0),
     "ui8_setup_halls_found": ("u8", 0),
+    "ui8_setup_hall_spread": ("u8", 0),
     "ui8_hall_calibrated": ("u8", 0),
     "ui32_hall_events": ("u32", 0),
     "ui32_pas_events": ("u32", 0),
@@ -704,6 +705,8 @@ MS_FIELDS = {"Voltage": ("i32", 0), "Speed": ("u32", 4), "i_q": ("i32", 12), "i_
              "u_abs": ("i32", 44), "Battery_Current": ("i32", 48), "assist_level": ("u8", 54),
              "Temperature": ("i16", 56), "int_Temperature": ("i16", 58)}
 HALLS = ["Hall_45", "Hall_51", "Hall_13", "Hall_32", "Hall_26", "Hall_64"]
+# autodetect forward / backward readings, same order as HALLS (firmware arrays q31_hall_fwd / q31_hall_bwd)
+HALL_DIRS = ["q31_hall_fwd", "q31_hall_bwd"]
 
 _SIZES = {"u8": 1, "u16": 2, "i16": 2, "u32": 4, "i32": 4}
 
@@ -745,6 +748,12 @@ class Live:
             for h in HALLS:
                 if h in self.syms:
                     regions.append((self.syms[h][0], 4)); plan.append((h, self.syms[h][0], "u32"))
+            for arr in HALL_DIRS:
+                if arr in self.syms:
+                    base = self.syms[arr][0]
+                    regions.append((base, 24))
+                    for n in range(6):
+                        plan.append((f"{arr}{n}", base + 4 * n, "u32"))
         if "adcData" in self.syms:
             base = self.syms["adcData"][0]
             regions.append((base, 18))
@@ -778,6 +787,33 @@ def hall_angles_deg(snap):
     if None in vals:
         return None
     return [v * 360.0 / 2 ** 32 for v in vals]
+
+
+def hall_directions_deg(snap):
+    """[(forward, backward, difference)] in degrees for the 6 edges (HALLS order), or None (older firmware)."""
+    if not snap:
+        return None
+    out = []
+    for n in range(6):
+        f, b = snap.get(f"q31_hall_fwd{n}"), snap.get(f"q31_hall_bwd{n}")
+        if f is None or b is None:
+            return None
+        fd, bd = f * 360.0 / 2 ** 32, b * 360.0 / 2 ** 32
+        out.append((fd, bd, (bd - fd + 180) % 360 - 180))
+    return out
+
+
+def hall_spread_text(snap):
+    """One line about the forward / backward comparison of the autodetect."""
+    dirs = hall_directions_deg(snap)
+    spread = snap.get("ui8_setup_hall_spread") if snap else None
+    if not dirs or spread is None:
+        return ""
+    diffs = " ".join(f"{d:+.0f}" for _, _, d in dirs)
+    verdict = ("good" if spread <= 15 else "the motor turns stiffly or a hall sensor switches late: lift the wheel, check "
+               "the brake and calibrate again" if spread <= 40 else "very large: the motor did not follow well, check "
+               "wiring, brake, freewheel")
+    return f"Forward/backward difference per edge: {diffs} deg, max {spread} deg - {verdict}. The averages are used."
 
 
 def check_hall_angles(angles):

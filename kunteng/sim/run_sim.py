@@ -418,7 +418,44 @@ def main():
     offs = [int.from_bytes([b], "big", signed=True) for b in res.get("offs", bytes(8))]
     emf = int.from_bytes(res.get("emf", b"\0\0")[:2], "big")
     check([offs[st] for st in [4, 6, 2, 3, 1, 5]] == [3, -2, 1, -4, 2, 0] and emf == 300,
-          "offsets %s, back-EMF constant %d" % ([offs[st] for st in [4, 6, 2, 3, 1, 5]], emf), fails)
+          "offsets %s, back-EMF constant %d (old 10 byte block)" % ([offs[st] for st in [4, 6, 2, 3, 1, 5]], emf), fails)
+
+    print("measured rotor offset from the new 12 byte block replaces the setting")
+    blk = [ord("L"), 1, 0, 0, 0, 0, 0, 0x01, 0x00, 0xA5, 177]
+    blk.append((~sum(blk)) & 0xFF)
+    sim = Sim(ihx, syms)
+    sim.setmem(0x4100, blk)
+    boot(sim, kt.settings_block(kt.default_settings()))
+    sim.dump("settings", "kt_settings", 13)
+    res = sim.go()
+    st = res.get("settings", b"")
+    check(len(st) >= 13 and st[12] == 177, "rotor offset 177 instead of 202 (%s)" % (list(st[12:13])), fails)
+
+    # ---------------------------------------------------------------- 8: hall autodetect
+    # SIMULATION build: hall states from the forced field angle with true rotor offset 190, edge errors
+    # +3 -2 +4 -3 +2 -4 (states 4 6 2 3 1 5) and 4/256 lag in the direction of travel (kunteng/motor.c sim_hall)
+    print("hall autodetect, forward + backward (simulated halls: offset 190, edge errors, 4/256 lag)")
+    sim = Sim(ihx, syms)
+    sim.setmem(0x53E8, [0])          # throttle released
+    boot(sim, kt.settings_block(kt.default_settings()))
+    sim.setmem(0x53E8, [0])
+    sim.setmem(0x53F2, [140])        # 10S at 38 V
+    sim.run_ms(400)
+    sim.setmem(syms["ui8_ad_cmd"], [1])
+    for _ in range(14):
+        sim.run_ms(500)
+    for n, k in (("ui8_ad_state", 1), ("ui8_ad_spread", 1), ("ui8_ad_rotor_offset", 1), ("ui8_ad_fwd", 8),
+                 ("i8_hall_offset", 8)):
+        sim.dump(n, n, k)
+    res = sim.go(timeout=120)
+    state = res.get("ui8_ad_state", b"\0")[0] if res.get("ui8_ad_state") else -1
+    offs = [int.from_bytes([b], "big", signed=True) for b in res.get("i8_hall_offset", bytes(8))]
+    check(state == 3, "autodetect finished (state %d)" % state, fails)
+    check(res.get("ui8_ad_rotor_offset", b"\0")[:1] == bytes([190]),
+          "rotor offset %s (true 190, forward only would be ~194)" % list(res.get("ui8_ad_rotor_offset", b"")), fails)
+    check([offs[s] for s in (4, 6, 2, 3, 1, 5)] == [3, -2, 4, -3, 2, -4],
+          "edge offsets %s (true +3 -2 +4 -3 +2 -4)" % [offs[s] for s in (4, 6, 2, 3, 1, 5)], fails)
+    check(8 <= (res.get("ui8_ad_spread", b"\0")[0]) <= 10, "spread %s/256 (2 x 4 lag)" % list(res.get("ui8_ad_spread", b"")), fails)
 
     print()
     print("ALL OK" if not fails else "%d FAILED" % len(fails))

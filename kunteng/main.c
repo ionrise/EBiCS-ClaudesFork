@@ -107,6 +107,7 @@ int main (void)
     // because of continue; at the end of each if code block that will stop the while (1) loop there,
     // the first if block code will have the higher priority over the others
     display_poll (); // answer requests of the display (KingMeter / Bafang wait for an answer)
+    motor_autodetect (); // hall autodetect, started by the setup app (blocks ~6 s, only at standstill)
 
     ui16_TIM2_counter = TIM2_GetCounter ();
     if ((ui16_TIM2_counter - ui16_motor_fast_controller_counter) > 78) // every 10ms

@@ -233,13 +233,53 @@ class SwimTests(unittest.TestCase):
         rows = dict(kt_live.describe(snap))
         self.assertIn("brake", rows["Controller state"])
 
+    def test_kt_autodetect_command_and_result(self):
+        import kt_live
+        t = FakeStm8StLink()
+        syms = {"ui8_ad_cmd": [0x26F, 1], "ui8_ad_state": [0x270, 1], "ui8_ad_progress": [0x271, 1],
+                "ui8_ad_spread": [0x278, 1], "ui8_ad_rotor_offset": [0x279, 1], "ui8_ad_fwd": [0x78, 8],
+                "ui8_ad_bwd": [0x80, 8]}
+        # the "firmware": once the command is written, it reports a finished measurement
+        orig_store = t._store
+
+        def store(data):
+            a = t.write_addr
+            orig_store(data)
+            if a == 0x26F and data and data[0] == 1:
+                t.mem[0x26F] = 0
+                t.mem[0x270] = 3
+                t.mem[0x271] = 100
+                t.mem[0x278] = 9
+                t.mem[0x279] = 190
+                t.mem[0x78:0x80] = bytes([0, 110, 27, 62, 197, 146, 234, 0])
+                t.mem[0x80:0x88] = bytes([0, 101, 18, 53, 188, 137, 225, 0])
+        t._store = store
+        sess = kt_live.LiveSession(syms, transport=_Reuse(t))
+        res = sess.autodetect(log=lambda _l: None, sleep=lambda _s: None)
+        sess.close()
+        self.assertEqual(res["ui8_ad_rotor_offset"], 190)
+        self.assertNotIn(swim.SWIM_ASSERT_RESET, t.log)
+        text = "\n".join(kt_live.describe_autodetect(res))
+        self.assertIn("Rotor offset: 190/256", text)
+        self.assertIn("-12.7", text)   # 9/256 difference of each edge, backward minus forward
+
+    def test_lishui_hall_directions(self):
+        import ebics_core as core
+        snap = {"ui8_setup_hall_spread": 9}
+        for n in range(6):
+            snap[f"q31_hall_fwd{n}"] = int((n * 60 + 5) / 360 * 2 ** 32)
+            snap[f"q31_hall_bwd{n}"] = int((n * 60 - 4) % 360 / 360 * 2 ** 32)
+        dirs = core.hall_directions_deg(snap)
+        self.assertAlmostEqual(dirs[0][2], -9.0, places=3)   # wraps around 0 deg correctly
+        self.assertIn("max 9 deg - good", core.hall_spread_text(snap))
+
     def test_live_symbols_from_map(self):
         import kt_live
         mp = os.path.join(os.path.dirname(__file__), "..", "kunteng", "build", "main.map")
         if not os.path.isfile(mp):
             self.skipTest("kunteng firmware not built")
         syms = kt_live.live_symbols(kt_live.read_map(mp))
-        self.assertEqual(len(syms), len(kt_live.LIVE_VARS))   # every live variable found (long names are cut in the map)
+        self.assertEqual(len(syms), len(kt_live.LIVE_VARS) + len(kt_live.AD_VARS))   # all found (long names are cut in the map)
 
     def test_firmware_build_output_parses(self):
         ihx = os.path.join(os.path.dirname(__file__), "..", "kunteng", "build", "main.ihx")

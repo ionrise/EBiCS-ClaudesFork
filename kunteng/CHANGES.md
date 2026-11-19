@@ -82,4 +82,20 @@ More bugs of the original found on the way (simulator):
 | ebike_app.c | Standstill wheel period `36000 x circumference` overflowed 16 bits above 1.82 m (26": 74250 -> 8714 ms, the display showed 0.9 km/h) | 65000 ms |
 | ebike_app.c | External speed sensor assumed connected at power on with the shortest period: ~850 km/h for 4 s | Not connected until the first pulse |
 
+## Hall autodetect (forward + backward)
+
+casainho's firmware has no autodetect: the hall position is the fixed `MOTOR_ROTOR_OFFSET_ANGLE` 202, right for
+Q85/Q100 motors only. `motor_autodetect()` (started by the apps over SWIM, wheel lifted, standstill only) turns
+the field slowly with ~2.5 A (regulated with the phase B sensor): one turn to lock, 2 turns forward recorded,
+half a turn back, 2 turns backward recorded. At each hall edge the field angle is recorded; the rotor lags the
+field and the halls switch late in the direction of travel, both with the opposite sign backwards, so the
+average is the true edge and the difference (spread) shows the quality. Result: the rotor offset (replaces the
+setting) and the 6 edge offsets, saved in the 12 byte learned block (the old 10 byte block is still read).
+Refused: not all edges in both directions, an edge more than 28 deg off its 60 deg position, spread over 56 deg.
+
+Checked in the motor simulator with a free rotor (true offset 190, edge errors ±4/256): 2 N friction and 2 deg
+hall hysteresis -> 191, 5 N / 4 deg -> 192, the forward-only reading would be 203 / 215; a motor that cannot
+follow is reported as failed. In ucsim (the compiled firmware with simulated halls) exactly 190 and the edge
+errors, spread 9/256.
+
 Removed: the 360° interpolation mode (was off by default, replaced by the new interpolation).

@@ -221,7 +221,11 @@ class Controller extends ChangeNotifier {
     'ui16_throttle': 'u16', 'ui16_throttle_offset': 'u16', 'uint16_full_rotation_counter': 'u16',
     'i16_hall_order': 'i16', 'ui32_KV': 'i16', 'ui8_watchdog_reset': 'u8', 'ui16_motor_temp_adc': 'u16',
     'ui8_sensorless_running': 'u8', 'ui8_settings_source': 'u8', 'ui8_motor_temp_sensor_ok': 'u8',
+    'ui8_setup_hall_spread': 'u8',
   };
+
+  /// Autodetect forward / backward readings, same order as [halls].
+  static const hallDirs = ['q31_hall_fwd', 'q31_hall_bwd'];
   static const msFields = <String, (String, int)>{
     'Voltage': ('i32', 0), 'Speed': ('u32', 4), 'i_q': ('i32', 12), 'i_q_setpoint': ('i32', 16),
     'u_abs': ('i32', 44), 'Battery_Current': ('i32', 48), 'assist_level': ('u8', 54),
@@ -251,6 +255,13 @@ class Controller extends ChangeNotifier {
           for (final h in halls) {
             final s = _syms[h];
             if (s != null) plan.add((h, s.$1, 'u32'));
+          }
+          for (final arr in hallDirs) {
+            final s = _syms[arr];
+            if (s == null) continue;
+            for (var n = 0; n < 6; n++) {
+              plan.add(('$arr$n', s.$1 + 4 * n, 'u32'));
+            }
           }
         }
         final adc = _syms['adcData'];
@@ -310,6 +321,26 @@ List<double>? hallAnglesDeg(Map<String, int>? snap) {
     out.add(v * 360.0 / 4294967296.0);
   }
   return out;
+}
+
+/// One line about the forward / backward comparison of the autodetect ('' for older firmware).
+String hallSpreadText(Map<String, int>? snap) {
+  final spread = snap?['ui8_setup_hall_spread'];
+  if (snap == null || spread == null) return '';
+  final diffs = <String>[];
+  for (var n = 0; n < 6; n++) {
+    final f = snap['q31_hall_fwd$n'], b = snap['q31_hall_bwd$n'];
+    if (f == null || b == null) return '';
+    final d = ((b - f) * 360.0 / 4294967296.0 + 540) % 360 - 180;
+    diffs.add('${d >= 0 ? '+' : ''}${d.round()}');
+  }
+  final verdict = spread <= 15
+      ? 'good'
+      : spread <= 40
+          ? 'the motor turns stiffly or a hall sensor switches late: lift the wheel, check the brake and calibrate again'
+          : 'very large: the motor did not follow well, check wiring, brake, freewheel';
+  return 'Forward/backward difference per edge: ${diffs.join(' ')} deg, max $spread deg - $verdict. '
+      'The averages are used.';
 }
 
 bool checkHallAngles(List<double>? angles) {

@@ -411,7 +411,24 @@ uint8_t ui8_foc_adjust_effective = 137;     // FOC sample angle + delay compensa
 // checksum ~(sum of bytes 0 ... 8). Written at standstill only, once per stop, only when changed.
 #define LEARNED_ADDRESS 0x4100
 static const uint8_t ui8_learn_order[6] = {4, 6, 2, 3, 1, 5};
-uint8_t ui8_learned_saved[10];
+uint8_t ui8_learned_saved[12];
+uint8_t ui8_rotor_offset_measured = 0;     // 1: rotor offset from the autodetect (EEPROM)
+
+// hall autodetect (motor_autodetect), the values are read and the command written by the setup apps over SWIM
+volatile uint8_t ui8_ad_cmd = 0;            // 1 = start
+volatile uint8_t ui8_ad_state = 0;          // 0 idle, 1 forward, 2 backward, 3 done, 4 failed
+volatile uint8_t ui8_ad_progress = 0;       // 0 ... 100
+volatile uint8_t ui8_ad_active = 0;
+volatile uint8_t ui8_ad_index = 0;          // forced sine table index
+volatile uint8_t ui8_ad_dir = 0;            // recording: 1 forward, 2 backward
+volatile int8_t ui8_ad_motion = 0;          // direction of the sweep
+volatile uint8_t ui8_ad_fwd[8];             // edge angle (/256) per hall state, forward
+volatile uint8_t ui8_ad_bwd[8];             // backward
+volatile uint8_t ui8_ad_found_fwd = 0;      // bit per hall state
+volatile uint8_t ui8_ad_found_bwd = 0;
+volatile uint8_t ui8_ad_spread = 0;         // largest forward/backward difference (/256)
+volatile uint8_t ui8_ad_rotor_offset = 0;   // measured rotor offset (/256)
+uint16_t ui16_ad_duty = 0;
 uint8_t ui8_standstill_ticks = 0;
 uint8_t ui8_learned_written_this_stop = 0;
 uint8_t ui8_zero_target_ticks = 0;          // 10 ms ticks with no current requested
@@ -431,6 +448,9 @@ uint16_t motor_current_controller (uint16_t ui16_target_current);
 void do_hall_error_recovery (void);
 void load_learned (void);
 void save_learned (void);
+#ifdef SIMULATION
+static uint8_t sim_hall (void);
+#endif
 void calc_speed_and_emf (void);
 uint16_t motor_speed_controller (void);
 void do_motor_state_machine (void);
@@ -470,6 +490,9 @@ void TIM1_UPD_OVF_TRG_BRK_IRQHandler(void) __interrupt(TIM1_UPD_OVF_TRG_BRK_IRQH
   /****************************************************************************/
   // hall sensors: rotor angle at every edge, sector timing, speed
   ui8_hall_sensors = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
+#ifdef SIMULATION
+  if (ui8_ad_active) { ui8_hall_sensors = sim_hall (); }
+#endif
   if (ui8_hall_sensors != ui8_hall_sensors_last)
   {
     if ((ui8_hall_sensors == 0) || (ui8_hall_sensors == 7))
@@ -490,6 +513,21 @@ void TIM1_UPD_OVF_TRG_BRK_IRQHandler(void) __interrupt(TIM1_UPD_OVF_TRG_BRK_IRQH
 
     ui8_previous_state = ui8_hall_sensors_last;
     ui8_hall_sensors_last = ui8_hall_sensors;
+
+    // autodetect: angle of this edge (the rotor is at the field: index - 64), per direction
+    if ((ui8_ad_dir == 1) && (ui8_previous_state >= 1) && (ui8_previous_state <= 6) &&
+        (ui8_hall_next_state[ui8_previous_state] == ui8_hall_sensors))
+    {
+      ui8_ad_fwd[ui8_hall_sensors] = (uint8_t) (ui8_ad_index - 64);
+      ui8_ad_found_fwd |= (uint8_t) (1 << ui8_hall_sensors);
+    }
+    else if ((ui8_ad_dir == 2) && (ui8_previous_state >= 1) && (ui8_previous_state <= 6) &&
+             (ui8_hall_next_state[ui8_hall_sensors] == ui8_previous_state))
+    {
+      // backwards the edge of state p is crossed from p to the state before it
+      ui8_ad_bwd[ui8_previous_state] = (uint8_t) (ui8_ad_index - 64);
+      ui8_ad_found_bwd |= (uint8_t) (1 << ui8_previous_state);
+    }
 
     // sector timing: only for forward steps, everything else restarts the measurement
     if ((ui8_previous_state >= 1) && (ui8_previous_state <= 6) &&
@@ -609,6 +647,7 @@ hall_done:
     ui8_motor_rotor_angle = ui8_motor_rotor_absolute_angle;
   }
   ui8_sinewave_table_index = ui8_motor_rotor_angle + ui8_angle_correction;
+  if (ui8_ad_active) { ui8_sinewave_table_index = ui8_ad_index; } // autodetect: the field is turned by hand
 
   /****************************************************************************/
   // peak phase B current per revolution
@@ -649,7 +688,12 @@ hall_done:
   /****************************************************************************/
   // duty cycle controller: current limits, regen limits, ramps
   ui8_adc_motor_total_current = UI8_ADC_MOTOR_TOTAL_CURRENT;
-  if (ui8_adc_motor_total_current > ui8_adc_target_motor_current_max) // battery current limit
+  if (ui8_ad_active) // autodetect: fixed small duty cycle (regulated in motor_autodetect), battery limit still on
+  {
+    if ((ui8_adc_motor_total_current > ui8_adc_target_motor_current_max) && ui16_ad_duty) { ui16_ad_duty--; }
+    ui16_duty_cycle = ui16_ad_duty;
+  }
+  else if (ui8_adc_motor_total_current > ui8_adc_target_motor_current_max) // battery current limit
   {
     if (ui16_duty_cycle > 0) { ui16_duty_cycle--; }
   }
@@ -1365,6 +1409,12 @@ void EXTI_PORTD_IRQHandler(void) __interrupt(EXTI_PORTD_IRQHANDLER)
   motor_controller_set_error (MOTOR_CONTROLLER_ERROR_06_SHORT_CIRCUIT);
 }
 
+// learned block (12 bytes at LEARNED_ADDRESS): 'L', offsets of the hall states 4, 6, 2, 3, 1, 5, back-EMF
+// constant (2 bytes), 0xA5 when the rotor offset was measured by the autodetect, rotor offset, checksum
+// ~(sum of bytes 0 ... 10). The first version had 10 bytes (checksum at byte 9): still read.
+#define LEARNED_LENGTH 12
+#define LEARNED_AUTODETECTED 0xA5
+
 static void learned_block (uint8_t *p)
 {
   uint8_t ui8_i;
@@ -1373,8 +1423,10 @@ static void learned_block (uint8_t *p)
   for (ui8_i = 0; ui8_i < 6; ui8_i++) { p[1 + ui8_i] = (uint8_t) i8_hall_offset[ui8_learn_order[ui8_i]]; }
   p[7] = (uint8_t) (ui16_emf_duty_per_erps_x256 >> 8);
   p[8] = (uint8_t) ui16_emf_duty_per_erps_x256;
-  for (ui8_i = 0; ui8_i < 9; ui8_i++) { ui8_sum += p[ui8_i]; }
-  p[9] = (uint8_t) ~ui8_sum;
+  p[9] = ui8_rotor_offset_measured ? LEARNED_AUTODETECTED : 0;
+  p[10] = kt_settings.ui8_rotor_offset_angle;
+  for (ui8_i = 0; ui8_i < 11; ui8_i++) { ui8_sum += p[ui8_i]; }
+  p[11] = (uint8_t) ~ui8_sum;
 }
 
 void load_learned (void)
@@ -1382,10 +1434,19 @@ void load_learned (void)
   uint8_t ui8_i;
   uint8_t ui8_sum = 0;
   int8_t i8_off;
-  for (ui8_i = 0; ui8_i < 10; ui8_i++) { ui8_learned_saved[ui8_i] = *((volatile uint8_t *) (LEARNED_ADDRESS + ui8_i)); }
-  for (ui8_i = 0; ui8_i < 9; ui8_i++) { ui8_sum += ui8_learned_saved[ui8_i]; }
-  if ((ui8_learned_saved[0] != 'L') || ((uint8_t) ~ui8_sum != ui8_learned_saved[9])) { return; }
-  if (!settings_flag (KT_FLAG_NO_HALL_LEARNING))
+  uint8_t ui8_new_format;
+  for (ui8_i = 0; ui8_i < LEARNED_LENGTH; ui8_i++) { ui8_learned_saved[ui8_i] = *((volatile uint8_t *) (LEARNED_ADDRESS + ui8_i)); }
+  if (ui8_learned_saved[0] != 'L') { return; }
+  for (ui8_i = 0; ui8_i < 11; ui8_i++) { ui8_sum += ui8_learned_saved[ui8_i]; }
+  ui8_new_format = ((uint8_t) ~ui8_sum == ui8_learned_saved[11]);
+  if (!ui8_new_format)
+  {
+    ui8_sum = 0;
+    for (ui8_i = 0; ui8_i < 9; ui8_i++) { ui8_sum += ui8_learned_saved[ui8_i]; }
+    if ((uint8_t) ~ui8_sum != ui8_learned_saved[9]) { return; }
+    ui8_learned_saved[9] = 0; // old block: no measured rotor offset
+  }
+  if (!settings_flag (KT_FLAG_NO_HALL_LEARNING) || (ui8_learned_saved[9] == LEARNED_AUTODETECTED))
   {
     for (ui8_i = 0; ui8_i < 6; ui8_i++)
     {
@@ -1396,12 +1457,27 @@ void load_learned (void)
     }
   }
   ui16_emf_duty_per_erps_x256 = (((uint16_t) ui8_learned_saved[7]) << 8) | ui8_learned_saved[8];
+  if (ui8_learned_saved[9] == LEARNED_AUTODETECTED)
+  {
+    // measured by the autodetect: replaces the hall angle offset of the settings (202 = Q85/Q100 only)
+    kt_settings.ui8_rotor_offset_angle = ui8_learned_saved[10];
+    ui8_rotor_offset_measured = 1;
+  }
+}
+
+static void write_learned (uint8_t *p_new)
+{
+  uint8_t ui8_i;
+#ifndef SIMULATION // ucsim never reports the end of an EEPROM write
+  eeprom_write_bytes (LEARNED_ADDRESS, p_new, LEARNED_LENGTH);
+#endif
+  for (ui8_i = 0; ui8_i < LEARNED_LENGTH; ui8_i++) { ui8_learned_saved[ui8_i] = p_new[ui8_i]; }
 }
 
 // every 100 ms: after 2 s at standstill, write the learned values if they changed (at most once per stop)
 void save_learned (void)
 {
-  uint8_t ui8_new[10];
+  uint8_t ui8_new[LEARNED_LENGTH];
   uint8_t ui8_i;
   uint8_t ui8_changed = 0;
   uint16_t ui16_old;
@@ -1419,10 +1495,158 @@ void save_learned (void)
   ui16_diff = (ui16_old > ui16_emf_duty_per_erps_x256) ? (ui16_old - ui16_emf_duty_per_erps_x256) :
                                                         (ui16_emf_duty_per_erps_x256 - ui16_old);
   if (ui16_diff > (ui16_old >> 5)) { ui8_changed = 1; }
-  if (ui8_learned_saved[0] != 'L') { ui8_changed = 1; }
+  if ((ui8_learned_saved[0] != 'L') || (ui8_new[9] != ui8_learned_saved[9]) || (ui8_new[10] != ui8_learned_saved[10])) { ui8_changed = 1; }
   if (!ui8_changed) { return; }
-#ifndef SIMULATION // ucsim never reports the end of an EEPROM write
-  eeprom_write_bytes (LEARNED_ADDRESS, ui8_new, 10);
+  write_learned (ui8_new);
+}
+
+/****************************************************************************/
+// Hall autodetect (started by the setup app: it writes 1 into ui8_ad_cmd over SWIM).
+// The sine output is turned slowly with a small voltage, the rotor's magnet follows the field: the rotor angle
+// is the sine table index - 64. At every hall edge the angle is recorded, forward and backward. The rotor lags
+// the field (friction, cogging) and the halls switch late in the direction of travel, both with the opposite
+// sign backwards: the average is the real edge, the difference (spread) shows how good the measurement is.
+// Result: rotor offset (replaces the 202 of the settings) and the 6 edge offsets, saved in the EEPROM.
+
+#define AD_STEP_TICKS 31        // 31 x 128 us = 4 ms per 1/256 turn: 1 electrical turn per second
+#define AD_TARGET_PEAK 20       // phase B current ~2.4 A (0.121 A per step)
+#define AD_DUTY_MAX 60          // of 508: limits the voltage even if the current sensor reads nothing
+
+static uint8_t ui8_ad_peak = 0;
+
+#ifdef SIMULATION
+// ucsim has no motor: hall states from the forced angle with a known placement, lag and hysteresis, so the
+// test can check the whole procedure. True rotor offset 190, edge errors below, 4/256 lag + hysteresis.
+static const int8_t i8_sim_err[6] = {3, -2, 4, -3, 2, -4}; // states 4, 6, 2, 3, 1, 5
+static uint8_t sim_hall (void)
+{
+  static const uint8_t ui8_order[6] = {4, 6, 2, 3, 1, 5};
+  static const uint8_t ui8_nom[6] = {0, 42, 85, 127, 170, 212};
+  uint8_t ui8_rotor = (uint8_t) (ui8_ad_index - 64 - ((ui8_ad_motion > 0) ? 4 : -4) - 190);
+  uint8_t ui8_k;
+  uint8_t ui8_state = 5;
+  // the last edge passed: the edge with the smallest distance below the rotor angle
+  {
+    uint8_t ui8_best = 255;
+    for (ui8_k = 0; ui8_k < 6; ui8_k++)
+    {
+      uint8_t ui8_d = (uint8_t) (ui8_rotor - (uint8_t) (ui8_nom[ui8_k] + i8_sim_err[ui8_k]));
+      if (ui8_d < ui8_best) { ui8_best = ui8_d; ui8_state = ui8_order[ui8_k]; }
+    }
+  }
+  return ui8_state;
+}
 #endif
-  for (ui8_i = 0; ui8_i < 10; ui8_i++) { ui8_learned_saved[ui8_i] = ui8_new[ui8_i]; }
+
+static void ad_wait_step (void)
+{
+  uint16_t ui16_start = TIM2_GetCounter ();
+  while ((uint16_t) (TIM2_GetCounter () - ui16_start) < AD_STEP_TICKS) { ; }
+}
+
+// one sweep: steps x 1/256 turn in the direction dir (+1 / -1), record = 1 forward, 2 backward, 0 not recorded
+static void ad_sweep (int8_t i8_dir, uint16_t ui16_steps, uint8_t ui8_record, uint8_t ui8_progress_start)
+{
+  uint16_t ui16_i;
+  uint8_t ui8_dev;
+  ui8_ad_motion = i8_dir;
+  ui8_ad_dir = ui8_record;
+  for (ui16_i = 0; ui16_i < ui16_steps; ui16_i++)
+  {
+    ui8_ad_index = (uint8_t) (ui8_ad_index + i8_dir);
+    ad_wait_step ();
+    // current: leaky peak of the phase B current, the duty cycle is regulated to the target every 16 steps
+    ui8_dev = UI8_ADC_PHASE_B_CURRENT;
+    ui8_dev = (ui8_dev > PHASE_B_ZERO) ? (ui8_dev - PHASE_B_ZERO) : (PHASE_B_ZERO - ui8_dev);
+    if (ui8_dev > ui8_ad_peak) { ui8_ad_peak = ui8_dev; }
+    if ((ui16_i & 15) == 15)
+    {
+      if ((ui8_ad_peak < AD_TARGET_PEAK) && (ui16_ad_duty < AD_DUTY_MAX)) { ui16_ad_duty += 2; }
+      else if ((ui8_ad_peak > AD_TARGET_PEAK + 6) && (ui16_ad_duty > 2)) { ui16_ad_duty -= 2; }
+      ui8_ad_peak -= ui8_ad_peak >> 2;
+    }
+    if (ui8_record) { ui8_ad_progress = ui8_progress_start + (uint8_t) ((ui16_i * 45) / ui16_steps); }
+  }
+  ui8_ad_dir = 0;
+}
+
+void motor_autodetect (void)
+{
+  static const uint8_t ui8_nom[6] = {0, 42, 85, 127, 170, 212};
+  uint8_t ui8_i;
+  uint8_t ui8_s;
+  uint8_t ui8_avg[6];
+  int8_t i8_d;
+  int16_t i16_sum = 0;
+  uint8_t ui8_spread = 0;
+  uint8_t ui8_offset;
+  int8_t i8_off[6];
+
+  if (ui8_ad_cmd != 1) { return; }
+  ui8_ad_cmd = 0;
+  ui8_ad_state = 4;
+  if (ui16_motor_speed_erps || !ebike_app_is_throttle_released () ||
+      (ui8_motor_controller_state != MOTOR_CONTROLLER_STATE_OK)) { return; } // only at standstill, no fault
+
+  for (ui8_i = 0; ui8_i < 8; ui8_i++) { ui8_ad_fwd[ui8_i] = 0; ui8_ad_bwd[ui8_i] = 0; }
+  ui8_ad_found_fwd = 0;
+  ui8_ad_found_bwd = 0;
+  ui8_ad_spread = 0;
+  ui8_ad_progress = 0;
+  ui8_coasting = 0;
+  ui16_ad_duty = 2;
+  ui8_ad_peak = 0;
+  ui8_ad_index = (uint8_t) (ui8_motor_rotor_absolute_angle + 64); // start at the field the rotor is at
+  ui8_ad_state = 1;
+  ui8_ad_active = 1;
+
+  ad_sweep (1, 256, 0, 0);      // one turn: the rotor locks to the field, the current settles
+  ad_sweep (1, 512, 1, 0);      // 2 turns forward, recorded
+  ui8_ad_state = 2;
+  ad_sweep (-1, 128, 0, 45);    // half a turn back: the lag changes side
+  ad_sweep (-1, 512, 2, 50);    // 2 turns backward, recorded
+
+  ui8_ad_active = 0;
+  ui16_duty_cycle = 0;
+  ui16_duty_cycle_target = 0;
+  ui8_ad_progress = 100;
+
+  if ((ui8_ad_found_fwd != 0x7E) || (ui8_ad_found_bwd != 0x7E)) { ui8_ad_state = 4; return; } // states 1 ... 6
+
+  // average of both directions, spread, rotor offset = mean of (edge - nominal)
+  for (ui8_i = 0; ui8_i < 6; ui8_i++)
+  {
+    ui8_s = ui8_learn_order[ui8_i];
+    i8_d = (int8_t) (ui8_ad_bwd[ui8_s] - ui8_ad_fwd[ui8_s]);
+    ui8_avg[ui8_i] = (uint8_t) (ui8_ad_fwd[ui8_s] + (i8_d / 2));
+    if (i8_d < 0) { i8_d = -i8_d; }
+    if ((uint8_t) i8_d > ui8_spread) { ui8_spread = (uint8_t) i8_d; }
+  }
+  ui8_ad_spread = ui8_spread;
+  // mean around the first edge (wrap safe): offset = edge0 + mean((edge_k - nominal_k) - edge0)
+  for (ui8_i = 0; ui8_i < 6; ui8_i++) { i16_sum += (int8_t) (uint8_t) (ui8_avg[ui8_i] - ui8_nom[ui8_i] - ui8_avg[0]); }
+  ui8_offset = (uint8_t) (ui8_avg[0] + (int8_t) (i16_sum / 6));
+  for (ui8_i = 0; ui8_i < 6; ui8_i++)
+  {
+    i8_off[ui8_i] = (int8_t) (uint8_t) (ui8_avg[ui8_i] - ui8_nom[ui8_i] - ui8_offset);
+    if ((i8_off[ui8_i] > 20) || (i8_off[ui8_i] < -20)) { ui8_ad_state = 4; return; } // hall sensors far off 60 deg
+  }
+  if (ui8_spread > 40) { ui8_ad_state = 4; return; } // more than 56 deg between the directions: motor binding
+
+  // use and keep the result
+  kt_settings.ui8_rotor_offset_angle = ui8_offset;
+  ui8_rotor_offset_measured = 1;
+  ui8_ad_rotor_offset = ui8_offset;
+  for (ui8_i = 0; ui8_i < 6; ui8_i++)
+  {
+    ui8_s = ui8_learn_order[ui8_i];
+    i8_hall_offset[ui8_s] = i8_off[ui8_i];
+    i16_hall_offset_x16[ui8_s] = ((int16_t) i8_off[ui8_i]) * 16;
+  }
+  {
+    uint8_t ui8_new[LEARNED_LENGTH];
+    learned_block (ui8_new);
+    write_learned (ui8_new);
+  }
+  ui8_ad_state = 3;
 }

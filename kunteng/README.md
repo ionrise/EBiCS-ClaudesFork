@@ -6,7 +6,9 @@ similar boards. Based on [casainho's BMSBattery_S_controllers_firmware](https://
 with the **EBiCS Setup** apps (PC and Android) over the SWIM pin of an ST-Link V2. No ST Visual Programmer needed.
 
 Displays: Kunteng KT-LCD3 / LCD5 / LCD8, KingMeter 901U / KM5S, Bafang LCD and 850C / 860C (setting
-"Display"). Both apps show live data of the running controller over the ST-Link (no restart).
+"Display"). Both apps show live data of the running controller over the ST-Link (no restart) and run a hall
+autodetect (Tools / step 6, wheel lifted): the motor turns slowly forward and back, the real hall positions
+are measured and saved in the controller.
 
 > Not tested on a real KT controller yet. It builds, and the motor code runs in the STM8 simulator (see
 > below), but test with the wheel lifted first and start with a low current.

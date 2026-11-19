@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ebics_core as core  # noqa: E402
 import kunteng_core as kt  # noqa: E402
 
-SYMBOLS = (list(core.LIVE_VARS) + core.HALLS +
+SYMBOLS = (list(core.LIVE_VARS) + core.HALLS + core.HALL_DIRS +
            ["MS", "adcData", "ui8_setup_cmd", "RS", "ui8_settings_source", "ui8_motor_temp_sensor_ok",
             "ebics_settings_flash"])
 TREE = ["Src", "Inc", "Drivers", "Startup", "make", "STM32F103C6Tx_FLASH.ld"]
@@ -104,7 +104,7 @@ def build_kunteng(out, manifest):
         data = Path(ihx).read_text()
         import kt_live
         syms = kt_live.live_symbols(kt_live.read_map(str(Path(tmp) / "main.map")))
-        if len(syms) != len(kt_live.LIVE_VARS):
+        if len(syms) != len(kt_live.LIVE_VARS) + len(kt_live.AD_VARS):
             print("   ERROR: live data symbols missing in the map file")
             return False
     (out / "kunteng.ihx").write_text(data)

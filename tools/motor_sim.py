@@ -751,6 +751,95 @@ def main():
                   f"of no-load, observer running {rows[-1]['obs_running']}  findings: {dict(FINDINGS) or '-'}")
 
 
+    section("10. hall autodetect: forward only vs forward + backward average (friction lag, hall hysteresis)")
+    autodetect_report(R, L, lam, SIGN, OFF)
+
+
+class DampedMotor(Motor):
+    """Motor with Coulomb friction (load) and some viscous damping, so the rotor settles behind the field."""
+
+    def __init__(self, *a, damping=2e-4, **k):
+        super().__init__(*a, **k)
+        self.damping = damping
+
+    def step(self, v_alpha, v_beta, dt, n=8):
+        super().step(v_alpha, v_beta, dt, n)
+        self.w -= self.damping * self.w / self.J * dt
+
+
+def autodetect_sim(R, L, lam, sign, off, load, hyst_deg, hall_err_deg, vbat=36.0):
+    """Port of autodetect(): open loop d current (300 units), field angle +-1 deg per 5 ms, 3 electrical turns
+    forward then 3 back. Halls switch at their (misplaced) edges with hysteresis. Returns per boundary
+    (true edge in the firmware's angle frame, forward reading, backward reading), degrees."""
+    m = DampedMotor(R, L, lam, J=2e-5, load=load, w=0.0, theta=math.radians(5))
+    fw = Firmware(amps_to_units(30))
+    fw.i_d_setpoint = 300
+    edges = [math.radians(k * 60 + hall_err_deg[k]) for k in range(6)]   # rotor angle of boundary k (sector k-1 -> k)
+    h = math.radians(hyst_deg)
+
+    def sector_of(th):
+        th %= 2 * math.pi
+        k = 5
+        for i in range(6):
+            if (th - edges[i]) % (2 * math.pi) < (edges[(i + 1) % 6] - edges[i]) % (2 * math.pi):
+                k = i
+        return k
+
+    sector = sector_of(m.theta)
+    field = (1 << 31)                       # q31_rotorposition_absolute = 1 << 31 in the firmware
+    rec = {1: {}, -1: {}}
+    steps_per_deg = int(round(0.005 / TS))
+    for direction in (1, -1):
+        for _ in range(1080):
+            field = (field + direction * 11930465) & 0xFFFFFFFF
+            theta_fw = field - (1 << 32) if field >= (1 << 31) else field
+            for _ in range(steps_per_deg):
+                ia, ib, ic = m.phase_currents()
+                fw.dyn_adc_state()
+                fw.foc(adc_counts(ia, sign), adc_counts(ib, sign), theta_fw)
+                legs = leg_voltages(fw.switchtime, vbat)
+                mean = sum(legs) / 3
+                va, vb, vc = (x - mean for x in legs)
+                m.step((2 / 3) * (va - 0.5 * vb - 0.5 * vc), (2 / 3) * (math.sqrt(3) / 2) * (vb - vc), TS)
+                # hall with hysteresis: the next boundary must be passed by h in the direction of travel
+                nxt, prv = (sector + 1) % 6, sector
+                th = m.theta
+                if (th - (edges[nxt] + h)) % (2 * math.pi) < math.pi / 2:
+                    sector = nxt
+                    rec[direction][nxt] = field * 360.0 / 2 ** 32
+                elif ((edges[prv] - h) - th) % (2 * math.pi) < math.pi / 2:
+                    sector = (sector - 1) % 6
+                    rec[direction][prv] = field * 360.0 / 2 ** 32
+    # the positive d current pulls the rotor's d axis to the opposite side of the field in this model's frame:
+    # +180 deg is the frame of the recorded field angle (the same for every edge, not an error)
+    off_deg = math.degrees(off) + 180.0
+    out = []
+    for k in range(6):
+        true = (math.degrees(edges[k]) + off_deg) % 360
+        out.append((true, rec[1].get(k), rec[-1].get(k)))
+    return out
+
+
+def _wrap(d):
+    return (d + 180) % 360 - 180
+
+
+def autodetect_report(R, L, lam, sign, off):
+    errs = (3, -4, 2, -3, 4, -2)
+    for load, hyst in ((0.0, 0.0), (0.02, 2.0), (0.05, 4.0)):
+        FINDINGS.clear()
+        res = autodetect_sim(R, L, lam, sign, off, load, hyst, errs)
+        if any(f is None or b is None for _, f, b in res):
+            print(f"  friction {load}, hysteresis {hyst} deg: not all edges seen {res}")
+            continue
+        e_fwd = [_wrap(f - t) for t, f, b in res]
+        e_avg = [_wrap(f + _wrap(b - f) / 2 - t) for t, f, b in res]
+        spread = max(abs(_wrap(b - f)) for t, f, b in res)
+        print(f"  friction {load:4.2f}, hysteresis {hyst:3.1f} deg: forward only error {min(e_fwd):+5.1f} .. {max(e_fwd):+5.1f} deg, "
+              f"average error {min(e_avg):+5.1f} .. {max(e_avg):+5.1f} deg, forward/backward spread {spread:4.1f} deg"
+              f"  findings: {dict(FINDINGS) or '-'}")
+
+
 if __name__ == "__main__":
     sys.setrecursionlimit(10000)
     main()

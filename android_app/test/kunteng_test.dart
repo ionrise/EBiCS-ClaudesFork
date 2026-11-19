@@ -25,6 +25,7 @@ class FakeStm8 implements UsbTransport {
   Uint8List _pending = Uint8List(0), _readbuf = Uint8List(0);
   int blockWrites = 0;
   int resets = 0;
+  void Function(int addr, int value)? onWrite;
 
   FakeStm8({this.locked = false}) {
     if (locked) {
@@ -104,6 +105,7 @@ class FakeStm8 implements UsbTransport {
         expect(mem[Swim.flashCr2] == 0x01 || mem[Swim.flashCr2] == 0x10, isTrue, reason: 'flash without block mode');
       }
       mem[a] = b;
+      onWrite?.call(a, b);
     }
   }
 
@@ -217,6 +219,40 @@ void main() {
     expect(ktDescribe(v['f_wheel_speed']!, snap['f_wheel_speed']!), '23.50 km/h');
     expect(ktDescribe(v['i8_hall_offset']!, snap['i8_hall_offset']!), '-4 +0 -2 +3 +1 +2');
     expect(chip.resets, 0, reason: 'live: no reset');
+  });
+
+  test('hall autodetect: command over SWIM and result table', () async {
+    final chip = FakeStm8();
+    chip.onWrite = (addr, value) {
+      if (addr == 0x26F && value == 1) {
+        chip.mem[0x26F] = 0;
+        chip.mem[0x270] = 3;
+        chip.mem[0x271] = 100;
+        chip.mem[0x278] = 9;
+        chip.mem[0x279] = 190;
+        chip.mem.setRange(0x78, 0x80, [0, 110, 27, 62, 197, 146, 234, 0]);
+        chip.mem.setRange(0x80, 0x88, [0, 101, 18, 53, 188, 137, 225, 0]);
+      }
+    };
+    final syms = jsonEncode({
+      'ui8_ad_cmd': [0x26F, 1],
+      'ui8_ad_state': [0x270, 1],
+      'ui8_ad_progress': [0x271, 1],
+      'ui8_ad_spread': [0x278, 1],
+      'ui8_ad_rotor_offset': [0x279, 1],
+      'ui8_ad_fwd': [0x78, 8],
+      'ui8_ad_bwd': [0x80, 8],
+    });
+    final c = KtController(
+      bundle: FwBundle('', syms: syms),
+      transport: () => chip,
+      sleep: noSleep,
+    );
+    final r = await c.autodetect((_) {}, poll: Duration.zero);
+    final text = ktDescribeAutodetect(r).join('\n');
+    expect(text, contains('Rotor offset: 190/256'));
+    expect(text, contains('-12.7'));
+    expect(chip.resets, 0);
   });
 
   testWidgets('start screen leads to the Kunteng screens', (tester) async {

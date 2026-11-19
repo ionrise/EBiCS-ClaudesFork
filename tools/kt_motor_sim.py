@@ -171,6 +171,12 @@ class Firmware:
         self.coasting = False
         self.coast_counter = 0
         self.hall_now = 0
+        self.ad_active = False
+        self.ad_index = 0
+        self.ad_dir = 0
+        self.ad_duty = 0
+        self.ad_fwd = [None] * 8
+        self.ad_bwd = [None] * 8
         self.coast_k = 0          # learned back-EMF constant (duty per erps x256)
         self.erps_x10_f = 0
         self.zero_ticks = 0
@@ -211,6 +217,10 @@ class Firmware:
             self.hall_invalid = 0
         if hall != self.hall_last and hall not in (0, 7):
             prev, self.hall_last = self.hall_last, hall
+            if self.ad_dir == 1 and 1 <= prev <= 6 and HALL_NEXT[prev] == hall:
+                self.ad_fwd[hall] = (self.ad_index - 64) & 0xFF
+            elif self.ad_dir == 2 and 1 <= prev <= 6 and HALL_NEXT[hall] == prev:
+                self.ad_bwd[prev] = (self.ad_index - 64) & 0xFF
             if not self.orig:
                 if 1 <= prev <= 6 and HALL_NEXT[prev] == hall and self.cnt6 < PWM_CYCLES_COUNTER_MAX:
                     self.period_sum = u16(self.period_sum - self.sector[prev] + self.cnt6, "period_sum")
@@ -291,6 +301,8 @@ class Firmware:
         else:
             self.rotor_angle = self.abs_angle
         index = (self.rotor_angle + self.correction) & 0xFF
+        if self.ad_active:
+            index = self.ad_index
 
         # peak phase B current per revolution
         self.pb_run = max(self.pb_run, abs(adc_phase_b8 - 126))
@@ -325,7 +337,11 @@ class Firmware:
         # duty cycle controller
         cur = adc_total8
         self.adc8 = adc_total8
-        if cur > self.target_max:
+        if self.ad_active:
+            if cur > self.target_max and self.ad_duty:
+                self.ad_duty -= 1
+            self.duty = self.ad_duty
+        elif cur > self.target_max:
             if self.duty > 0:
                 self.duty -= 1
         elif self.phase_limit_on and cur > self.offset8 and \
@@ -595,11 +611,12 @@ class Hardware:
         self.i_dc_f = 0.0
         self.i_b_f = 0.0
         self.broken_hall = False
+        self.hyst = 0.0                      # rad: halls switch late by this in the direction of travel
 
     def hall(self):
         if self.broken_hall:
             return 7
-        th = self.m.theta % (2 * math.pi)
+        th = (self.m.theta - self.hyst * (1 if self.m.w > 0 else -1 if self.m.w < 0 else 0)) % (2 * math.pi)
         rel = [(th - e) % (2 * math.pi) for e in self.edges]
         k = min(range(6), key=lambda i: rel[i])      # the last edge passed
         return HALL_ORDER[k]
@@ -666,6 +683,84 @@ def run(fw, motor, hw, seconds, target_fn, erps_max=340, log_every=0.01, brake_f
                              state=fw.motor_state, ctrl=fw.ctrl_state, offs=list(fw.hall_off), vbat=hw.vbat))
             peak_phase = 0.0
     return rows
+
+
+class FreeRotor(Motor):
+    """Motor with the wheel lifted: turns both ways, Coulomb friction (N at the rim) and viscous damping."""
+
+    def __init__(self, friction=0.0, damping=20.0, **kw):
+        super().__init__(**kw)
+        self.friction = friction
+        self.damping = damping
+        self.mass = 3.0
+        self.vel = 0.0
+
+    def _mech(self, h):
+        f = self.force_per_amp() * self.iq
+        if self.vel == 0.0 and abs(f) <= self.friction:
+            return                                        # static friction holds
+        fr = self.friction * (1 if self.vel > 0 else -1 if self.vel < 0 else (1 if f > 0 else -1))
+        self.vel += (f - fr - self.damping * self.vel) / self.mass * h
+        if abs(self.vel) < 1e-4 and abs(f) <= self.friction:
+            self.vel = 0.0
+        self.w = self.k * self.vel
+
+
+def kt_autodetect(fw, motor, hw):
+    """Port of motor_autodetect(): returns (state, rotor offset, offsets by state, spread, fwd, bwd)."""
+    order = HALL_ORDER
+    nom = [0, 42, 85, 127, 170, 212]
+    adc8, adcb, adcv = hw.offset8, 126, int(hw.vbat0 / 0.272)
+    t = 0.0
+    fw.ad_active = True
+    fw.ad_duty = 2
+    fw.ad_index = (fw.abs_angle + 64) & 0xFF
+    peak = 0
+
+    def sweep(direction, steps, record):
+        nonlocal adc8, adcb, adcv, t, peak
+        fw.ad_dir = record
+        for i in range(steps):
+            fw.ad_index = (fw.ad_index + direction) & 0xFF
+            t_end = t + 0.004
+            while t < t_end:
+                ccr, moe = fw.isr(hw.hall(), adc8, adcb, adcv)
+                duties = tuple(c / PWM_PERIOD for c in ccr)
+                mean = sum(duties) / 3
+                va, vb, vc = ((d - mean) * hw.vbat for d in duties)
+                motor.step((2 / 3) * (va - 0.5 * vb - 0.5 * vc), (1 / math.sqrt(3)) * (vb - vc), TS)
+                adc8, adc10, adcb, adcv, i_dc = hw.measure(duties, True, TS)
+                t += TS
+            dev = abs(adcb - 126)
+            peak = max(peak, dev)
+            if (i & 15) == 15:
+                if peak < 20 and fw.ad_duty < 60:
+                    fw.ad_duty += 2
+                elif peak > 26 and fw.ad_duty > 2:
+                    fw.ad_duty -= 2
+                peak -= peak >> 2
+        fw.ad_dir = 0
+
+    sweep(1, 256, 0)
+    sweep(1, 512, 1)
+    sweep(-1, 128, 0)
+    sweep(-1, 512, 2)
+    fw.ad_active = False
+    fw.duty = fw.duty_target = 0
+    if any(fw.ad_fwd[st] is None or fw.ad_bwd[st] is None for st in order):
+        return 4, None, None, None, fw.ad_fwd, fw.ad_bwd
+    avg, spread = [], 0
+    for st in order:
+        d = ((fw.ad_bwd[st] - fw.ad_fwd[st] + 128) & 0xFF) - 128
+        avg.append((fw.ad_fwd[st] + int(d / 2)) & 0xFF)
+        spread = max(spread, abs(d))
+    tot = sum((((a - n - avg[0]) + 128) & 0xFF) - 128 for a, n in zip(avg, nom))
+    offset = (avg[0] + int(tot / 6)) & 0xFF
+    offs = {st: (((a - n - offset) + 128) & 0xFF) - 128 for st, a, n in zip(order, avg, nom)}
+    fwd_only = [(fw.ad_fwd[st] - n) & 0xFF for st, n in zip(order, nom)]
+    tot_f = sum((((a - fwd_only[0]) + 128) & 0xFF) - 128 for a in fwd_only)
+    offset_fwd = (fwd_only[0] + int(tot_f / 6)) & 0xFF
+    return 3, offset, offs, spread, offset_fwd, None
 
 
 def stats(rows, key, t0=0.0, t1=1e9):
@@ -920,6 +1015,23 @@ def main():
         print(f"  {name:8s}: battery current while coasting {idle[1]:.2f} A avg, motor at 4 s "
               f"{[r['w_erps'] for r in rows if abs(r['t'] - 4) < 0.002][0]:.0f} erps, after re-apply max phase "
               f"{max(r['iph'] for r in re):.1f} A, min battery {min(r['idc'] for r in re):.1f} A  findings: {f or '-'}")
+
+    # 12. hall autodetect: forward only vs average, friction and hall hysteresis (wheel lifted)
+    print("\n=== 12. hall autodetect (true rotor offset 190, edge errors +3 -2 +4 -3 +2 -4 /256)")
+    errs256 = (3, -2, 4, -3, 2, -4)
+    for friction, hyst_deg in ((0.0, 0.0), (2.0, 2.0), (5.0, 4.0), (20.0, 4.0)):
+        FINDINGS.clear()
+        m = FreeRotor(friction=friction, v=0.0)
+        hw = hw_for(m, rotor_offset=190, hall_errors_deg=tuple(e * 360 / 256 for e in errs256))
+        hw.hyst = math.radians(hyst_deg)
+        fw = Firmware()
+        state, offset, offs, spread, offset_fwd, _ = kt_autodetect(fw, m, hw)
+        if state != 3:
+            print(f"  friction {friction:4.1f} N, hysteresis {hyst_deg} deg: motor could not follow the field: reported as failed (state 4)")
+            continue
+        got = [offs[st] for st in HALL_ORDER]
+        print(f"  friction {friction:4.1f} N, hysteresis {hyst_deg:3.1f} deg: rotor offset {offset} (forward only {offset_fwd}), "
+              f"edge offsets {got}, spread {spread}/256 ({spread * 360 / 256:.0f} deg)  findings: {dict(FINDINGS) or '-'}")
 
     # 10. high current S12S: int8 wrap of the original
     print("\n=== 10. S12S 25 A start: the original int8 current wraps above 15.9 A")

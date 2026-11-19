@@ -133,7 +133,8 @@ The apps ask at start whether you set up a **Lishui** controller (EBiCS, STM32) 
 controller (STM8S105: S06S, S12S, KT36/48 ...). For KT they install casainho's open source KT firmware with
 bug fixes and motor control improvements ([`kunteng/`](kunteng/README.md), [changes](kunteng/CHANGES.md)) over
 the SWIM pin of the same ST-Link V2: own SWIM driver in both apps, no ST Visual Programmer needed. KT, KingMeter
-and Bafang displays, live data in both apps. Settings are
+and Bafang displays, live data and a hall autodetect (both directions, measures the rotor offset instead of the
+fixed 202 of Q85/Q100 motors) in both apps. Settings are
 read from the STM8 EEPROM at power up, so they can be changed in a second without reinstalling. The PC app needs
 SDCC to build the KT firmware (`winget install SDCC.SDCC`) and Python `pyusb` + `libusb-package` for USB (it
 offers to install them). Not tested on a real KT controller yet: test with the wheel lifted.
@@ -236,7 +237,10 @@ The Lishui programming plug (white, 4 pins) usually has these colours - **check 
    torque sensor, throttle, EU legal mode. Hover over a question for help.
 6. **Install** - builds the firmware for your answers and flashes it (about a minute).
 7. **Motor calibration** - confirm the wheel can spin freely, click *Start calibration*:
-   - *Finding the hall sensor positions* - the motor turns slowly and may click (about 6 s)
+   - *Finding the hall sensor positions* - the motor turns slowly 3 turns forward and 3 back and may click
+     (about 11 s). Every hall edge is measured in both directions: the rotor lags the field (friction) and the
+     sensors switch late in the direction of travel, both with the opposite sign backwards, so the average is
+     the true position and the difference shows how good the measurement is (shown after the calibration)
    - *Measuring the motor speed* - the wheel spins up to full speed (can take a few minutes)
    - *Wait until the wheel has stopped* - the app waits until the hall sensors stop changing
    - The six hall angles are checked (they should be about 60 degrees apart)

@@ -56,6 +56,23 @@ class _KtHomeScreenState extends State<KtHomeScreen> {
     });
   }
 
+  Future<void> _autodetect() async {
+    final ok = await confirm(
+      context,
+      'Hall autodetect',
+      'The motor turns slowly forward and back (about 6 s, ~2.5 A).\n\nLift the wheel, release the brake and keep '
+          'hands away from the wheel. Needs the firmware installed by this app.',
+      yes: 'Start',
+    );
+    if (!ok || !mounted) return;
+    await _run('hall autodetect', () async {
+      final r = await AppScope.read(context).ktController.autodetect(_add);
+      for (final l in ktDescribeAutodetect(r)) {
+        _add(l);
+      }
+    });
+  }
+
   Future<void> _install() async {
     final app = AppScope.read(context);
     final p = app.kt.problems();
@@ -146,6 +163,13 @@ class _KtHomeScreenState extends State<KtHomeScreen> {
           step(4, 'Install the firmware with these settings.', 'Install', _install),
           const SizedBox(height: 8),
           step(5, 'Live data: what the controller sees while riding.', 'Live', () => _open(const KtLiveScreen())),
+          const SizedBox(height: 8),
+          step(
+            6,
+            'Hall autodetect (wheel lifted): measures where the hall sensors are, both directions.',
+            'Detect',
+            _autodetect,
+          ),
           if (_busy) const Padding(padding: EdgeInsets.only(top: 12), child: LinearProgressIndicator()),
           LogBox(_log, height: 260),
           const SizedBox(height: 8),

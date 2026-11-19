@@ -29,7 +29,13 @@ LIVE_VARS = [
     ("ui16_emf_duty_per_erps_x256", "u16", "Back-EMF constant", "", 1),
     ("i8_hall_offset", "i8x8", "Learned hall offsets", "/256", 1),
 ]
-SIZES = {"u8": 1, "i8": 1, "u16": 2, "i16": 2, "f32": 4, "i8x8": 8}
+SIZES = {"u8": 1, "i8": 1, "u16": 2, "i16": 2, "f32": 4, "i8x8": 8, "u8x8": 8}
+
+# hall autodetect (kunteng/motor.c motor_autodetect): the app writes 1 into ui8_ad_cmd
+AD_VARS = [("ui8_ad_cmd", "u8"), ("ui8_ad_state", "u8"), ("ui8_ad_progress", "u8"), ("ui8_ad_spread", "u8"),
+           ("ui8_ad_rotor_offset", "u8"), ("ui8_ad_fwd", "u8x8"), ("ui8_ad_bwd", "u8x8")]
+AD_STATES = {0: "idle", 1: "turning forward", 2: "turning backward", 3: "done", 4: "failed"}
+HALL_ORDER = (4, 6, 2, 3, 1, 5)
 
 STATE_BITS = [(2, "brake"), (4, "over current"), (8, "under voltage"), (32, "motor blocked"), (64, "over voltage"),
               (128, "hall error")]
@@ -56,8 +62,12 @@ def lookup(syms, name):
 
 
 def live_symbols(syms):
-    """Only the live variables, {name: [address, size]} (also what goes into kunteng.sym.json)."""
+    """Live and autodetect variables, {name: [address, size]} (also what goes into kunteng.sym.json)."""
     out = {}
+    for name, typ in AD_VARS:
+        a = lookup(syms, name)
+        if a is not None:
+            out[name] = [a, SIZES[typ]]
     for name, typ, *_ in LIVE_VARS:
         a = lookup(syms, name)
         if a is not None:
@@ -78,6 +88,8 @@ def decode(typ, raw):
         return struct.unpack(">f", raw[:4])[0]
     if typ == "i8x8":
         return [struct.unpack(">b", bytes([b]))[0] for b in raw[:8]]
+    if typ == "u8x8":
+        return list(raw[:8])
     raise ValueError(typ)
 
 
@@ -109,6 +121,65 @@ class LiveSession:
         if self.open:
             self.s.close()
         self.open = False
+
+    def read_vars(self, names_types):
+        if not self.open:
+            self.connect()
+        out = {}
+        for name, typ in names_types:
+            if name in self.symbols:
+                addr, size = self.symbols[name]
+                out[name] = decode(typ, self.s.read_mem(addr, size))
+        return out
+
+    def autodetect(self, log=print, sleep=None, timeout_s=20.0):
+        """Starts the hall autodetect and waits for the result (dict of the AD_VARS values)."""
+        import time
+        sleep = sleep or time.sleep
+        if "ui8_ad_cmd" not in self.symbols:
+            raise swim.SwimError("this firmware has no hall autodetect (install the current firmware)")
+        if not self.open:
+            self.connect()
+        self.s.write_byte(self.symbols["ui8_ad_cmd"][0], 1)
+        last = -1
+        t = 0.0
+        res = {}
+        while t < timeout_s:
+            sleep(0.3)
+            t += 0.3
+            res = self.read_vars(AD_VARS)
+            if res.get("ui8_ad_cmd") == 1 and t > 1.0:
+                raise swim.SwimError("the firmware did not start the autodetect (motor turning, throttle pressed or "
+                                     "a fault active?)")
+            p = res.get("ui8_ad_progress", 0)
+            if p // 10 != last and res.get("ui8_ad_state") in (1, 2):
+                last = p // 10
+                log("  %s ... %d %%" % (AD_STATES.get(res.get("ui8_ad_state")), p))
+            if res.get("ui8_ad_state") in (3, 4) and res.get("ui8_ad_cmd") == 0:
+                return res
+        raise swim.SwimError("no result after %d s" % timeout_s)
+
+
+def describe_autodetect(res):
+    """Text lines for the autodetect result."""
+    state = res.get("ui8_ad_state")
+    if state != 3:
+        return ["Autodetect FAILED: not all hall edges seen in both directions, edges more than 28 deg off 60 deg, "
+                "or the motor did not follow (lift the wheel, release the brake, check the hall wires)."]
+    deg = 360.0 / 256
+    lines = ["Hall autodetect done (angles in deg, 0 = state 4 edge):",
+             "  hall state   forward  backward  average  difference"]
+    fwd, bwd = res.get("ui8_ad_fwd", [0] * 8), res.get("ui8_ad_bwd", [0] * 8)
+    for st in HALL_ORDER:
+        d = ((bwd[st] - fwd[st] + 128) & 0xFF) - 128
+        avg = (fwd[st] + int(d / 2)) & 0xFF
+        lines.append("  %d            %6.1f    %6.1f   %6.1f    %+5.1f" % (st, fwd[st] * deg, bwd[st] * deg, avg * deg, d * deg))
+    spread = res.get("ui8_ad_spread", 0) * deg
+    lines.append("Rotor offset: %d/256 (setting default 202). Largest difference %.0f deg: %s" % (
+        res.get("ui8_ad_rotor_offset", 0), spread,
+        "good" if spread <= 15 else "the motor turns stiffly (brake, freewheel?)" if spread <= 40 else "very large"))
+    lines.append("Saved in the controller, used from now on (also after power off).")
+    return lines
 
 
 def describe(snap):

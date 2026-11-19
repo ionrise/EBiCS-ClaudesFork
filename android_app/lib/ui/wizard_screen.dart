@@ -653,6 +653,8 @@ class _CalibrateStepState extends State<_CalibrateStep> {
           ? '  - look good.'
           : '  - unusual spacing. It may still work; if the motor runs rough, calibrate again.';
     }
+    final spread = hallSpreadText(snap);
+    if (spread.isNotEmpty) msg += '\n$spread';
     final kv = snap?['ui32_KV'] ?? 0;
     if (kv != 0) msg += '\nMotor KV value: $kv';
     _set('Calibration done, the wheel has stopped.', Tone.ok, msg);

@@ -218,6 +218,14 @@ q31_t tic_array[6];
 const q31_t deg_30 = 357913941;
 // angles for 120° setup
 q31_t Hall_13 = 0;
+// autodetect: edge angles of the forward and backward sweep (order 45, 51, 13, 32, 26, 64), their average,
+// and the largest forward/backward difference in degrees (read by the setup apps)
+q31_t q31_hall_fwd[6];
+q31_t q31_hall_bwd[6];
+q31_t q31_hall_avg[6];
+volatile uint8_t ui8_setup_halls_found_bwd = 0;
+volatile uint8_t ui8_setup_hall_spread = 0;
+static int8_t i8_direction_fwd = 1;
 q31_t Hall_32 = 0;
 q31_t Hall_26 = 0;
 q31_t Hall_64 = 0;
@@ -2488,6 +2496,41 @@ int main(void)
 		}
 		else return 0;
 	}
+	// one open loop sweep of 3 electrical turns (1 deg per 5 ms, d current), dir = 1 forward, -1 backward.
+	// Every hall edge: field angle into dst[] (index order 45, 51, 13, 32, 26, 64), found bits per direction.
+	static void autodetect_sweep(int8_t i8_dir, q31_t *dst, uint8_t ui8_progress_start) {
+		uint8_t ui8_idx;
+		for (i = 0; i < 1080; i++) {
+			HAL_IWDG_Refresh(&hiwdg);
+			q31_rotorposition_absolute += i8_dir * 11930465; //drive motor in open loop with steps of 1 deg
+			ui8_setup_progress = ui8_progress_start + (uint8_t)((i*50UL)/1080);
+			HAL_Delay(5);
+
+			if (ui8_hall_state_old != ui8_hall_state) {
+				printf_("angle: %d, hallstate:  %d, hallcase %d, q31_angle %u \n",
+						(int16_t) (((q31_rotorposition_absolute >> 23) * 180) >> 8),
+						ui8_hall_state, ui8_hall_case,q31_rotorposition_absolute);
+
+				switch (ui8_hall_case) //12 cases for each transition from one stage to the next. 6x forward, 6x reverse
+				{
+				case 45: case 54: ui8_idx = 0; break;
+				case 51: case 15: ui8_idx = 1; break;
+				case 13: case 31: ui8_idx = 2; break;
+				case 32: case 23: ui8_idx = 3; break;
+				case 26: case 62: ui8_idx = 4; break;
+				case 64: case 46: ui8_idx = 5; break;
+				default: ui8_idx = 6; break;
+				}
+				if (ui8_idx < 6) {
+					dst[ui8_idx] = q31_rotorposition_absolute;
+					if (i8_dir > 0) ui8_setup_halls_found |= (1 << ui8_idx);
+					else ui8_setup_halls_found_bwd |= (1 << ui8_idx);
+				}
+				ui8_hall_state_old = ui8_hall_state;
+			}
+		}
+	}
+
 	void autodetect() {
 #ifdef SENSORLESS
 		ui8_setup_state = 4; //no hall sensors to calibrate (saves ~600 bytes, the sensorless builds are close to full)
@@ -2497,6 +2540,8 @@ int main(void)
 		ui8_setup_state = 1;
 		ui8_setup_progress = 0;
 		ui8_setup_halls_found = 0;
+		ui8_setup_halls_found_bwd = 0;
+		ui8_setup_hall_spread = 0;
 		MS.hall_angle_detect_flag = 0; //set uq to contstant value in FOC.c for open loop control
 		q31_rotorposition_absolute = 1 << 31;
 		i16_hall_order = 1;//reset hall order
@@ -2505,78 +2550,13 @@ int main(void)
 		//	uint8_t zerocrossing = 0;
 		//	q31_t diffangle = 0;
 		HAL_Delay(5);
-		for (i = 0; i < 1080; i++) {
-			HAL_IWDG_Refresh(&hiwdg);
-			q31_rotorposition_absolute += 11930465; //drive motor in open loop with steps of 1 deg
-			ui8_setup_progress = (uint8_t)((i*100UL)/1080);
-			HAL_Delay(5);
-			//printf_("%d, %d, %d, %d\n", temp3>>16,temp4>>16,temp5,temp6);
-
-			if (ui8_hall_state_old != ui8_hall_state) {
-				printf_("angle: %d, hallstate:  %d, hallcase %d, q31_angle %u \n",
-						(int16_t) (((q31_rotorposition_absolute >> 23) * 180) >> 8),
-						ui8_hall_state, ui8_hall_case,q31_rotorposition_absolute);
-
-				switch (ui8_hall_case) //12 cases for each transition from one stage to the next. 6x forward, 6x reverse
-				{
-				//6 cases for forward direction
-				case 64:
-					Hall_64=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<0);
-					break;
-				case 45:
-					Hall_45=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<1);
-					break;
-				case 51:
-					Hall_51=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<2);
-					break;
-				case 13:
-					Hall_13=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<3);
-					break;
-				case 32:
-					Hall_32=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<4);
-					break;
-				case 26:
-					Hall_26=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<5);
-					break;
-
-					//6 cases for reverse direction
-				case 46:
-					Hall_64=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<0);
-					break;
-				case 62:
-					Hall_26=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<5);
-					break;
-				case 23:
-					Hall_32=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<4);
-					break;
-				case 31:
-					Hall_13=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<3);
-					break;
-				case 15:
-					Hall_51=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<2);
-					break;
-				case 54:
-					Hall_45=q31_rotorposition_absolute;
-					ui8_setup_halls_found |= (1<<1);
-					break;
-
-				} // end case
-
-
-				ui8_hall_state_old = ui8_hall_state;
-			}
-		}
+		// Forward 3 electrical turns, then back 3 turns. Each hall edge is seen in both directions: the rotor
+		// lags the field (friction, cogging) and the hall sensors switch late in the direction of travel, both
+		// with the opposite sign backwards. The average is the true edge, the difference shows how good the
+		// measurement is (like the Fardriver autodetect).
+		autodetect_sweep(1, q31_hall_fwd, 0);
+		i8_direction_fwd = i8_recent_rotor_direction;
+		autodetect_sweep(-1, q31_hall_bwd, 50);
 
 		CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE); //Disable PWM if motor is not turning
 		TIM1->CCR1 = 1023; //set initial PWM values
@@ -2590,15 +2570,32 @@ int main(void)
 		MS.i_d_setpoint= 0;
 		uint32_tics_filtered=1000000;
 
-		if(ui8_setup_halls_found != 0x3F){ //not all 6 hall positions seen: wiring/hall problem, don't save garbage
+		if(ui8_setup_halls_found != 0x3F || ui8_setup_halls_found_bwd != 0x3F){ //not all 6 hall positions seen in both directions: wiring/hall problem, don't save garbage
 			ui8_setup_state = 4;
-			printf_("autodetect failed, halls found: %d \n", ui8_setup_halls_found);
+			printf_("autodetect failed, halls found: %d / %d \n", ui8_setup_halls_found, ui8_setup_halls_found_bwd);
 			return;
+		}
+		{
+			// average of both directions (unsigned arithmetic: the q31 angles wrap around at 360 deg)
+			uint32_t ui32_spread_max = 0;
+			for (i = 0; i < 6; i++) {
+				int32_t i32_diff = (int32_t) ((uint32_t) q31_hall_bwd[i] - (uint32_t) q31_hall_fwd[i]);
+				uint32_t ui32_abs = (i32_diff < 0) ? (uint32_t) (-(i32_diff + 1)) + 1 : (uint32_t) i32_diff;
+				if (ui32_abs > ui32_spread_max) ui32_spread_max = ui32_abs;
+				q31_hall_avg[i] = (q31_t) ((uint32_t) q31_hall_fwd[i] + (uint32_t) (i32_diff / 2));
+			}
+			ui8_setup_hall_spread = (uint8_t) ((((uint64_t) ui32_spread_max) * 360) >> 32); // degrees, max of the 6 edges
+			Hall_45 = q31_hall_avg[0];
+			Hall_51 = q31_hall_avg[1];
+			Hall_13 = q31_hall_avg[2];
+			Hall_32 = q31_hall_avg[3];
+			Hall_26 = q31_hall_avg[4];
+			Hall_64 = q31_hall_avg[5];
 		}
 
 		HAL_FLASH_Unlock();
 
-		if (i8_recent_rotor_direction == 1) {
+		if (i8_direction_fwd == 1) {
 			EE_WriteVariable(EEPROM_POS_HALL_ORDER, 1);
 			i16_hall_order = 1;
 		} else {

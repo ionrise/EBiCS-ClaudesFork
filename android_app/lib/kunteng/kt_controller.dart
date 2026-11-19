@@ -98,6 +98,42 @@ class KtController {
     return out;
   }
 
+  /// Starts the hall autodetect over the live connection and waits for the result (ktAdVars values).
+  Future<Map<String, Object>> autodetect(
+    void Function(String) log, {
+    Duration poll = const Duration(milliseconds: 300),
+  }) async {
+    await liveSnapshot(); // connects and loads the addresses
+    final cmd = _liveSyms!['ui8_ad_cmd'];
+    if (cmd == null) throw SwimException('this firmware has no hall autodetect (install the current firmware)');
+    try {
+      await _live!.writeByte(cmd.$1, 1);
+      var last = -1;
+      for (var i = 0; i < 70; i++) {
+        await Future<void>.delayed(poll);
+        final r = <String, Object>{};
+        for (final (name, type) in ktAdVars) {
+          final s = _liveSyms![name];
+          if (s != null) r[name] = ktDecode(type, await _live!.readMem(s.$1, s.$2));
+        }
+        if (r['ui8_ad_cmd'] == 1 && i > 3) {
+          throw SwimException(
+            'the firmware did not start the autodetect (motor turning, throttle pressed or a fault?)',
+          );
+        }
+        final st = r['ui8_ad_state'] as int? ?? 0, p = r['ui8_ad_progress'] as int? ?? 0;
+        if ((st == 1 || st == 2) && p ~/ 10 != last) {
+          last = p ~/ 10;
+          log('  ${ktAdStates[st]} ... $p %');
+        }
+        if ((st == 3 || st == 4) && r['ui8_ad_cmd'] == 0) return r;
+      }
+      throw SwimException('no result after 20 s');
+    } finally {
+      await stopLive();
+    }
+  }
+
   Future<void> stopLive() async {
     final s = _live, t = _liveT;
     _live = null;

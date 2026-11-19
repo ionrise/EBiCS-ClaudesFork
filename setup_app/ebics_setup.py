@@ -952,7 +952,8 @@ class KtToolsPage(Page):
         bar = ttk.Frame(self, style="Page.TFrame")
         bar.pack(anchor="w")
         for text, key in (("Check connection", "check"), ("Unlock chip (erases flash)", "unlock"),
-                          ("Show build settings", "defines"), ("Open firmware folder", "folder")):
+                          ("Hall autodetect", "autodetect"), ("Show build settings", "defines"),
+                          ("Open firmware folder", "folder")):
             ttk.Button(bar, text=text, command=lambda k=key: self.run(k)).pack(side="left", padx=(0, 8))
         self.log = LogBox(self, height=22)
         self.log.pack(fill="both", expand=True, pady=(12, 0))
@@ -973,6 +974,31 @@ class KtToolsPage(Page):
             self.app.bg(lambda: kt.unlock(log=self._log),
                         lambda ok: self.log.add("unlocked - switch the controller off and on again, then install the firmware"
                                                 if ok is True else "unlock failed"))
+        elif what == "autodetect":
+            if not messagebox.askyesno("Hall autodetect", "The motor turns slowly 3 turns forward and 2.5 back "
+                                                          "(about 6 s, ~2.5 A).\n\nLift the wheel, release the brake and "
+                                                          "keep hands away from the wheel. Start?"):
+                return
+            syms = kt.live_symbols()
+            if not syms:
+                self.log.add("Build and install the firmware first (no map file of the build found).")
+                return
+            self.log.add("--- hall autodetect")
+
+            def job():
+                sess = kt_live.LiveSession(syms)
+                try:
+                    return sess.autodetect(log=self._log)
+                finally:
+                    sess.close()
+
+            def done(res):
+                if isinstance(res, Exception):
+                    self.log.add(f"ERROR: {res}")
+                    return
+                for line in kt_live.describe_autodetect(res):
+                    self.log.add(line)
+            self.app.bg(job, done)
         elif what == "defines":
             self.log.clear()
             for line in kt.describe_build(self.app.settings).splitlines():
@@ -1500,9 +1526,12 @@ class WizardPage(Page):
         if ang:
             msg = "Hall angles: " + ", ".join(f"{a:.0f}°" for a in ang)
             msg += "  - look good." if good else "  - unusual spacing. It may still work; if the motor runs rough, calibrate again."
+        spread = core.hall_spread_text(snap) if isinstance(snap, dict) else ""
+        if spread:
+            msg += "\n" + spread
         if isinstance(snap, dict) and snap.get("ui32_KV"):
             msg += f"\nMotor KV value: {snap['ui32_KV']}"
-        detail.configure(text=msg)
+        detail.configure(text=msg, wraplength=px(760), justify="left")
         self.block(False)
 
     def s_direction(self):
