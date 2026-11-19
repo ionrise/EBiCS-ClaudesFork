@@ -19,9 +19,11 @@
 
 #include "sensorless.h"
 
-// voltage scaling for the observer (ADC * 25.6 mV / sqrt(3) = 15, <<8), see the Sensorless_VESC branch
+// voltage scaling for the observer: phase volts = u * Vbat / 3511 (svpwm gain), Vbat = adc * CAL_V mV,
+// observer units mV<<8 per count of u*adc>>11 -> CAL_V * 256 * 2048 / 3511 = CAL_V * 149.3 (25 mV -> 3733).
+// The branch used 15<<8 = 3840: 2.9 % too much voltage, the angle error at low speed / high current doubled.
 #ifndef OBS_CAL_V
-#define OBS_CAL_V (15LL<<8)
+#define OBS_CAL_V ((long long)CAL_V * 1493 / 10)
 #endif
 // angle correction for the current filter delay
 #ifndef FILTER_DELAY
@@ -220,13 +222,18 @@ void sensorless_observe(q31_t u_alpha, q31_t u_beta, q31_t i_alpha, q31_t i_beta
 	// correct the phase shift of the filtered currents (rotate by the delay angle)
 	arm_park_q31(i_alpha, i_beta, &ia_c, &ib_c, sin_delay, cos_delay);
 
+	// the current measured now was driven by the voltage applied during the last PWM period = the voltage
+	// computed in the previous call (u_alpha/u_beta of this call are applied in the next period)
+	static q31_t ua_prev = 0, ub_prev = 0;
 	long long vbat = adcData[0];
-	observer_update(((long long)u_alpha * vbat * OBS_CAL_V) >> 11,
-	                ((long long)(-u_beta) * vbat * OBS_CAL_V) >> 11,
+	observer_update(((long long)ua_prev * vbat * OBS_CAL_V) >> 11,
+	                ((long long)(-ub_prev) * vbat * OBS_CAL_V) >> 11,
 	                (long long)(-ia_c) * (long long)CAL_I,
 	                (long long)(-ib_c) * (long long)CAL_I,
 	                &e_a, &e_b);
 
+	ua_prev = u_alpha;
+	ub_prev = u_beta;
 	q31_obs_angle = atan2_q31(e_a, -e_b) + RS.obs_angle_offset;
 	if (ui8_sensorless_running) {
 		q31_teta_obs = q31_obs_angle;

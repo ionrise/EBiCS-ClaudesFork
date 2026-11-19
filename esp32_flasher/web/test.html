@@ -1,0 +1,15 @@
+<!doctype html><meta charset="utf-8"><title>settings_block.js test</title><pre id="o">running ...</pre>
+<!-- Checks the web page's settings block against the Python reference.
+     From the repository root:  python -m http.server 8765   then open http://127.0.0.1:8765/esp32_flasher/web/test.html
+     (run setup_app/build_variants.py first, it writes the test vectors) -->
+<script src="settings_block.js"></script>
+<script>
+(async () => {
+  const out = [];
+  const vec = await (await fetch("../../android_app/assets/firmware/test_vectors.json")).json();
+  for (const v of vec) { const h = EB.hex(EB.buildBlock(v.settings)); out.push(v.name + ": " + (h === v.block_hex ? "OK" : "MISMATCH\n" + h + "\n" + v.block_hex)); }
+  out.push("defaults have no problems: " + (EB.problems(EB.defaults()).length === 0 ? "OK" : "NO"));
+  out.push("CRC-32: " + (EB.crc32(new TextEncoder().encode("123456789")) === 0xCBF43926 ? "OK" : "NO"));
+  document.getElementById("o").textContent = out.join("\n");
+})();
+</script>

@@ -160,6 +160,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _section(String section) => ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text('Hold a setting to see what it means.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+          ),
           if (section == 'expert') ...[
             const StatusLine(
                 'Only change these if you know what they do. Wrong values can damage the motor or controller.',

@@ -18,6 +18,9 @@ flutter test
 flutter build apk --release
 ```
 
+GitHub Actions (`.github/workflows/android-apk.yml`) does the same on every push to `master` / `feature/**`,
+with the same ARM GCC as System Workbench (7-2018-q2), and attaches the APK as the artifact `EBiCS-Setup-apk`.
+
 The APK is `build/app/outputs/flutter-apk/app-release.apk`, signed with the debug key (fine for installing
 directly, not for Google Play). `assets/firmware/` is generated, not in git.
 

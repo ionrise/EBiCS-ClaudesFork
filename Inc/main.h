@@ -102,6 +102,9 @@
 #ifndef VOLTAGE_RAMP_MV
 #define VOLTAGE_RAMP_MV 1000                   // soft current ramp width at cutoff and full charge voltage
 #endif
+#ifndef CURRENT_RAMP_MS
+#define CURRENT_RAMP_MS 300                    // ms from 0 to full phase current, 0 = no ramp
+#endif
 #ifndef SPEED_TEMP_ADC
 #define SPEED_TEMP_ADC 6                       // adcData index of the speed/temperature input: 6 = AD1 (PB1), 5 = AD2 (PB0)
 #endif

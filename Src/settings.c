@@ -100,6 +100,7 @@ static const ebics_settings_t settings_default = {
 	.obs_flux_linkage = FLUX_LINKAGE,
 	.obs_gamma = GAMMA,
 	.obs_angle_offset = (int32_t)(OBS_ANGLE_OFFSET),
+	.current_ramp_ms = CURRENT_RAMP_MS,
 };
 
 uint32_t settings_crc32(const uint8_t *data, uint32_t len)
@@ -133,6 +134,7 @@ static uint8_t settings_plausible(const ebics_settings_t *s)
 	if ((s->flags & (SF_SPEED_FROM_WIRE | SF_TEMP_FROM_WIRE)) && s->speed_temp_adc != 5 && s->speed_temp_adc != 6) return 0;
 	if ((s->flags & SF_TEMP_FROM_WIRE) && s->ntc_pullup_ohm < 1) return 0;
 	if (s->obs_gamma < 0 || s->obs_gamma > 30) return 0;
+	if (s->current_ramp_ms < 0 || s->current_ramp_ms > 10000) return 0;
 	return 1;
 }
 

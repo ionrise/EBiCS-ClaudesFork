@@ -419,7 +419,7 @@ class _BikeStepState extends State<_BikeStep> {
 
   @override
   Widget build(BuildContext context) => _Page([
-        _p(context, 'A few questions. Tap ? for help. You can change all of this later in Settings.'),
+        _p(context, 'A few questions. Hold a setting (or tap ?) to see what it means. You can change all of this later in Settings.'),
         for (final k in _keys)
           if (_visible(k))
             FieldEditor(

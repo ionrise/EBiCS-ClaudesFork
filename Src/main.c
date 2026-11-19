@@ -55,6 +55,10 @@
 #include "FOC.h"
 #include "config.h"
 #include "eeprom.h"
+#if (DISPLAY_TYPE != DISPLAY_TYPE_DEBUG)
+//no UART debug output without the debug display: saves the printf code (flash)
+#define printf_(...) ((void)0)
+#endif
 
 
 #if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
@@ -258,6 +262,16 @@ volatile uint8_t ui8_hall_calibrated = 0;    // 1 if hall angles were loaded fro
 volatile uint8_t ui8_watchdog_reset = 0;     // 1 if the last reset was caused by the watchdog
 volatile uint32_t ui32_hall_events = 0;      // counts every hall sensor change (gear ratio measurement by hand)
 volatile uint32_t ui32_pas_events = 0;       // counts PAS sensor pulses (sensor check)
+volatile uint16_t ui16_ticks_since_hall = 65535; // 8 kHz ticks since the last hall edge (TIM2 wraps after 132 ms)
+volatile uint8_t ui8_hall_edges = 0;          // hall edges since the motor started turning (reset after 125 ms standstill)
+volatile uint8_t ui8_overcurrent = 0;         // 1 = software overcurrent trip, PWM off until the request is released
+volatile uint8_t ui8_oc_trips = 0;            // number of trips since power on (3 = stays off until restart)
+volatile uint8_t ui8_stall_limited = 0;       // 1 = current limited because the motor does not turn
+int16_t i16_oc_limit = 1950;                  // phase current trip level in ADC counts
+static uint8_t ui8_oc_count = 0;
+int32_t i32_ramp_step16 = 0;                  // current ramp: setpoint step per FOC cycle <<16, 0 = no ramp
+int32_t i32_iq_ramped16 = 0;                  // ramped phase current setpoint <<16
+volatile uint8_t ui8_kv_valid = 0;            // 1 = motor constant KV measured (EEPROM or KV detect), needed for coasting
 volatile uint8_t ui8_motor_temp_sensor_ok = 0; // 1 = NTC reading plausible, 0 = open/shorted/not connected (temperature ignored)
 volatile uint16_t ui16_motor_temp_adc = 0;   // filtered NTC reading of the speed/temperature input (only samples above the threshold)
 volatile uint32_t ui32_motor_temp_adc_cumulated = 2048UL<<4;
@@ -402,6 +416,14 @@ int main(void)
 
 	//runtime settings: block written by the Android setup app, or the config.h values
 	settings_load();
+	// software overcurrent trip at 1.5x the max phase current (at least the hall autodetect current, at most the ADC range)
+	i16_oc_limit = (RS.ph_current_max * 3) / 2;
+	if (i16_oc_limit < 500) i16_oc_limit = 500;
+	if (i16_oc_limit > 1950) i16_oc_limit = 1950;
+	// current ramp: full phase current in current_ramp_ms (FOC runs at 15779 Hz, ~16 cycles per ms; 32 bit math:
+	// a 64 bit division here pulled in ~1 KB of library code)
+	i32_ramp_step16 = (RS.current_ramp_ms > 0) ? (int32_t)(((uint32_t)RS.ph_current_max << 16) / ((uint32_t)RS.current_ramp_ms * 16)) : 0;
+	if (RS.current_ramp_ms > 0 && i32_ramp_step16 < 1) i32_ramp_step16 = 1;
 	ui16_throttle_offset = RS.throttle_offset;
 	i8_direction = RS.reverse;
 	uint32_PAS_counter = RS.pas_timeout+1;
@@ -672,8 +694,8 @@ int main(void)
 		printf_("Hall_64: %u \n",	Hall_64);
 		HAL_IWDG_Refresh(&hiwdg);
 
-		EE_ReadVariable(EEPROM_POS_KV, &ui32_KV);
-		if(!ui32_KV)ui32_KV=111;
+		if(EE_ReadVariable(EEPROM_POS_KV, (uint16_t*)&ui32_KV)==0 && ui32_KV>0) ui8_kv_valid=1;
+		if(ui32_KV<=0)ui32_KV=111;
 		printf_("KV: %d \n",ui32_KV	);
 		HAL_IWDG_Refresh(&hiwdg);
 
@@ -1014,6 +1036,40 @@ int main(void)
 			MS.i_q_setpoint=map(MS.int_Temperature, CONTROLLER_TEMPERATURE_THRESHOLD,CONTROLLER_TEMPERATURE_MAX,MS.i_q_setpoint,0); //ramp down power with processor temperatur to avoid overheating the controller
 #endif
 
+			//stall protection: more than half the max current for 3 s without the motor turning -> limit to a quarter,
+			//until the motor turns again or the request is released (protects motor and MOSFETs, e.g. blocked wheel)
+			{
+				static uint32_t ui32_stall_since = 0;
+#ifdef SENSORLESS
+				uint8_t ui8_turning = ui8_sensorless_running;
+#else
+				uint8_t ui8_turning = ui16_ticks_since_hall < 4000;   //hall edge within the last 0.5 s
+#endif
+				int32_t i32_sp_abs = MS.i_q_setpoint < 0 ? -MS.i_q_setpoint : MS.i_q_setpoint;
+				if (!ui8_turning && i32_sp_abs > (RS.ph_current_max >> 1)) {
+					if (!ui32_stall_since) ui32_stall_since = HAL_GetTick() | 1;
+					else if (HAL_GetTick() - ui32_stall_since > 3000) ui8_stall_limited = 1;
+				}
+				else {
+					ui32_stall_since = 0;
+					if (ui8_turning || !i32_sp_abs) ui8_stall_limited = 0;
+				}
+				if (ui8_stall_limited) {
+					int32_t i32_lim = RS.ph_current_max >> 2;
+					if (MS.i_q_setpoint > i32_lim) MS.i_q_setpoint = i32_lim;
+					if (MS.i_q_setpoint < -i32_lim) MS.i_q_setpoint = -i32_lim;
+				}
+			}
+
+			//overcurrent trip recovery: after the request has been released for 1 s (3 trips: off until restart)
+			if (ui8_overcurrent) {
+				static uint32_t ui32_oc_released_since = 0;
+				if (MS.i_q_setpoint || ui8_oc_trips >= 3) ui32_oc_released_since = 0;
+				else if (!ui32_oc_released_since) ui32_oc_released_since = HAL_GetTick() | 1;
+				else if (HAL_GetTick() - ui32_oc_released_since > 1000) { ui8_overcurrent = 0; ui32_oc_released_since = 0; }
+			}
+
+#ifndef SENSORLESS //KV detect is started by the hall calibration only
 			//auto KV detect
 			if(ui8_KV_detect_flag){
 				MS.i_q_setpoint=ui8_KV_detect_flag;
@@ -1027,6 +1083,7 @@ int main(void)
 						ui8_KV_detect_flag=0;
 						HAL_FLASH_Unlock();
 						EE_WriteVariable(EEPROM_POS_KV, (int16_t) ui32_KV);
+						if(ui32_KV>0) ui8_kv_valid=1;
 						HAL_FLASH_Lock();
 					}
 				}
@@ -1035,6 +1092,7 @@ int main(void)
 
 
 			}//end KV detect
+#endif
 
 
 
@@ -1044,7 +1102,9 @@ int main(void)
 			//of a fast spinning direct drive motor; switched on again below with the speed based PI start value)
 			{
 				static uint32_t ui32_no_current_since = 0;
-				if(MS.i_q_setpoint || brake_flag || ui8_KV_detect_flag || !MS.hall_angle_detect_flag) ui32_no_current_since = HAL_GetTick();
+				//only with a measured KV: switching on again at speed pre-loads the voltage from KV; with the default KV
+				//the simulation showed up to 45 A at switch-on, so without a calibration the PWM stays on (old behaviour)
+				if(MS.i_q_setpoint || brake_flag || ui8_KV_detect_flag || !MS.hall_angle_detect_flag || !ui8_kv_valid) ui32_no_current_since = HAL_GetTick();
 				else if(READ_BIT(TIM1->BDTR, TIM_BDTR_MOE) && (HAL_GetTick() - ui32_no_current_since) > 100){
 					CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
 					TIM1->CCR1 = 1023;
@@ -1056,7 +1116,8 @@ int main(void)
 			}
 #endif
 			//enable PWM if power is wanted
-			if (MS.i_q_setpoint&&!READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)){
+			if (MS.i_q_setpoint&&!READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)&&!ui8_overcurrent){
+				i32_iq_ramped16 = 0;   //current ramp starts from zero
 
 				uint16_half_rotation_counter=0;
 				uint16_full_rotation_counter=0;
@@ -1762,6 +1823,8 @@ int main(void)
 #endif
 
 			if(ui32_tim3_counter<32000)ui32_tim3_counter++;
+			if(ui16_ticks_since_hall < 65535) ui16_ticks_since_hall++;
+			if(ui16_ticks_since_hall > 1000) ui8_hall_edges = 0;   //125 ms without hall edge: standing still
 			if (uint32_PAS_counter < RS.pas_timeout+1){
 				uint32_PAS_counter++;
 				if(HAL_GPIO_ReadPin(PAS_GPIO_Port, PAS_Pin))uint32_PAS_HIGH_counter++;
@@ -1872,11 +1935,31 @@ int main(void)
 			} // end case
 #endif
 
+			//software overcurrent trip: a phase current above the limit for 4 FOC cycles in a row switches the PWM off
+			//(the hardware break input is not used on this board)
+			{
+				int16_t i16_a = i16_ph1_current < 0 ? -i16_ph1_current : i16_ph1_current;
+				int16_t i16_b = i16_ph2_current < 0 ? -i16_ph2_current : i16_ph2_current;
+				int16_t i16_c = i16_ph1_current + i16_ph2_current;
+				if (i16_c < 0) i16_c = -i16_c;
+				if (i16_b > i16_a) i16_a = i16_b;
+				if (i16_c > i16_a) i16_a = i16_c;
+				if (i16_a > i16_oc_limit && READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)) {
+					if (++ui8_oc_count >= 4) {
+						CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+						ui8_overcurrent = 1;
+						if (ui8_oc_trips < 255) ui8_oc_trips++;
+						ui8_oc_count = 0;
+					}
+				}
+				else ui8_oc_count = 0;
+			}
 
 			__disable_irq(); //ENTER CRITICAL SECTION!!!!!!!!!!!!!
 
 			//extrapolate recent rotor position
 			ui16_tim2_recent = __HAL_TIM_GET_COUNTER(&htim2); // read in timertics since last event
+#ifndef SENSORLESS
 			if (MS.hall_angle_detect_flag) {
 				if(ui16_timertics<SIXSTEPTHRESHOLD && ui16_tim2_recent<200)ui8_6step_flag=0;
 				if(ui16_timertics>(SIXSTEPTHRESHOLD*6)>>2)ui8_6step_flag=1;
@@ -1885,8 +1968,11 @@ int main(void)
 				if(MS.angle_est){
 					q31_rotorposition_PLL += q31_angle_per_tic;
 				}
-				if (ui16_tim2_recent < ui16_timertics+(ui16_timertics>>2) && !ui8_overflow_flag && !ui8_6step_flag) { //prevent angle running away at standstill
-					if(MS.angle_est&&iabs(q31_PLL_error)<deg_30){
+				//interpolate from the second hall edge on at any speed (was: only above the 6-step threshold, the 6-step
+				//region caused +-30 deg angle jumps = the noise at start-up). 6-step only before two edges or after a stop.
+				if (ui16_tim2_recent < ui16_timertics+(ui16_timertics>>2) && !ui8_overflow_flag
+						&& ui8_hall_edges >= 2 && ui16_ticks_since_hall < 1000 && ui16_timertics < 65535) { //prevent angle running away at standstill
+					if(MS.angle_est&&iabs(q31_PLL_error)<deg_30&&!ui8_6step_flag){
 						q31_rotorposition_absolute=q31_rotorposition_PLL;
 						MS.system_state=PLL;
 					}
@@ -1906,13 +1992,18 @@ int main(void)
 
 				}
 			} //end if hall angle detect
+#endif
 			//temp2=(((q31_rotorposition_absolute >> 23) * 180) >> 8);
 			__enable_irq(); //EXIT CRITICAL SECTION!!!!!!!!!!!!!!
 
 #ifndef DISABLE_DYNAMIC_ADC
 
 			//get the Phase with highest duty cycle for dynamic phase current reading
+#ifdef SENSORLESS
+			dyn_adc_state(q31_teta_obs); //was the hall angle (constant without halls): wrong phases sampled at high duty
+#else
 			dyn_adc_state(q31_rotorposition_absolute);
+#endif
 			//set the according injected channels to read current at Low-Side active time
 
 			if (MS.char_dyn_adc_state!=char_dyn_adc_state_old){
@@ -1953,7 +2044,11 @@ int main(void)
 
 		temp5=TIM3->CNT;
 
-		if(TIM2->CCR1>20)ui16_timertics = TIM2->CCR1; //debounce hall signals
+		//TIM2 is 16 bit at 496 kHz and wraps after 132 ms: after a long pause CCR1 holds a nonsense (wrapped) interval
+		if(ui16_ticks_since_hall > 1000) ui16_timertics = 65535;
+		else if(TIM2->CCR1>20)ui16_timertics = TIM2->CCR1; //debounce hall signals
+		ui16_ticks_since_hall = 0;
+		if(ui8_hall_edges < 255) ui8_hall_edges++;
 
 
 		//Hall sensor event processing
@@ -1966,6 +2061,7 @@ int main(void)
 		if(MS.hall_angle_detect_flag){ //only process, if autodetect procedere is fininshed
 			ui8_hall_state_old=ui8_hall_state;
 		}
+#ifndef SENSORLESS
 #if (USE_FIX_POSITIONS)
 //Check for 60° hall configuration
 		if(ui8_hall_state==0)i16_60deg_Hall_flag |= 0b1;
@@ -1991,6 +2087,7 @@ int main(void)
 #else
 		Set_Hall_Angle120();
 #endif
+#endif //SENSORLESS
 
 		uint32_tics_filtered-=uint32_tics_filtered>>3;
 		uint32_tics_filtered+=ui16_timertics;
@@ -2591,6 +2688,23 @@ int main(void)
 #ifdef SENSORLESS
 		i32_iq_setpoint = sensorless_q_setpoint(i32_iq_setpoint); //0 during the open loop start, faded in at the hand-over
 #endif
+		// current ramp: the setpoint rises at most by ph_current_max per current_ramp_ms (smooth take-off), it drops
+		// immediately (releasing the throttle / braking acts at once). 0 ms = no ramp.
+		if (i32_ramp_step16 && !brake_flag) {
+			int32_t i32_target16 = i32_iq_setpoint << 16;
+			if (i32_target16 >= 0) {
+				if (i32_iq_ramped16 < 0) i32_iq_ramped16 = 0;
+				if (i32_iq_ramped16 < i32_target16) { i32_iq_ramped16 += i32_ramp_step16; if (i32_iq_ramped16 > i32_target16) i32_iq_ramped16 = i32_target16; }
+				else i32_iq_ramped16 = i32_target16;
+			}
+			else {
+				if (i32_iq_ramped16 > 0) i32_iq_ramped16 = 0;
+				if (i32_iq_ramped16 > i32_target16) { i32_iq_ramped16 -= i32_ramp_step16; if (i32_iq_ramped16 < i32_target16) i32_iq_ramped16 = i32_target16; }
+				else i32_iq_ramped16 = i32_target16;
+			}
+			i32_iq_setpoint = i32_iq_ramped16 >> 16;
+		}
+		else i32_iq_ramped16 = i32_iq_setpoint << 16;
 		// battery / regen current limit as a clamp of the phase current setpoint: i_q_max = I_bat_max / (k*u_q).
 		// The old code switched the current PI to the (slowly filtered) battery current: it oscillated between
 		// 0 and 2x the limit in the simulation. u_q is low pass filtered (16 ms), unfiltered it oscillates in regen.

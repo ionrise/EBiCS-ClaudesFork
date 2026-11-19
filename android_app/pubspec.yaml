@@ -2,7 +2,7 @@ name: ebics_setup
 description: "EBiCS Setup: install and calibrate EBiCS on a Lishui controller from an Android phone (ST-Link V2 on USB OTG)."
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 2.2.0+4
 
 environment:
   sdk: ^3.14.0
@@ -21,5 +21,6 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/ebics_logo.png
     # Prebuilt firmware variants + symbol maps, made by setup_app/build_variants.py (in CI)
     - assets/firmware/
