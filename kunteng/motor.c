@@ -288,6 +288,7 @@ uint8_t ui8_svm_table [SVM_TABLE_LEN] =
 };
 
 #include "settings.h"
+#include "eeprom.h"
 
 /*
  * Changes against casainho's original (see kunteng/CHANGES.md):
@@ -396,10 +397,41 @@ uint16_t ui16_wheel_speed_sensor_counter;
 
 uint8_t ui8_over_current_counter = 0;
 uint8_t ui8_over_current_retries = 0;
+uint8_t ui8_hall_invalid_counter = 0;
+uint8_t ui8_coasting = 0;              // geared motor, no current requested: PWM off, motor spins freely
+uint8_t ui8_coast_counter = 0;
+// back-EMF constant: duty cycle per erps (x256), learned whenever the current is ~0 A. Used to restart a
+// spinning motor after coasting and as the lower duty cycle limit while regen braking.
+uint16_t ui16_emf_duty_per_erps_x256 = 0;
+uint16_t ui16_erps_x10_filtered = 0;        // speed in 1/10 erps, low pass (raw value has 2 % steps)
+uint8_t ui8_foc_adjust_effective = 137;     // FOC sample angle + delay compensation for the speed
+
+// learned values (hall edge offsets, back-EMF constant) are kept in the data EEPROM, so they are there right
+// after power on. Block: 'L', offsets of the hall states 4, 6, 2, 3, 1, 5, back-EMF constant (2 bytes),
+// checksum ~(sum of bytes 0 ... 8). Written at standstill only, once per stop, only when changed.
+#define LEARNED_ADDRESS 0x4100
+static const uint8_t ui8_learn_order[6] = {4, 6, 2, 3, 1, 5};
+uint8_t ui8_learned_saved[10];
+uint8_t ui8_standstill_ticks = 0;
+uint8_t ui8_learned_written_this_stop = 0;
+uint8_t ui8_zero_target_ticks = 0;          // 10 ms ticks with no current requested
+uint8_t ui8_brake_pwm_off = 0;              // braking without a known back-EMF constant: PWM off
+// peak phase B current of the last electrical revolution (ADC steps of ~0.12 A from zero). The battery
+// current alone can not tell "0 A" from "motor shorted" (duty cycle far below the back-EMF: phase current
+// flows, battery current is ~0)
+uint8_t ui8_phase_b_peak_running = 0;
+volatile uint8_t ui8_phase_b_peak = 0;
+#define PHASE_B_ZERO 126
+#define PHASE_B_SMALL 24                    // ~3 A
+#define PHASE_B_SHORTED 40                  // ~5 A
 
 // functions prototypes
 void do_battery_voltage_protection (void);
-uint16_t motor_current_controller (void);
+uint16_t motor_current_controller (uint16_t ui16_target_current);
+void do_hall_error_recovery (void);
+void load_learned (void);
+void save_learned (void);
+void calc_speed_and_emf (void);
 uint16_t motor_speed_controller (void);
 void do_motor_state_machine (void);
 void calc_motor_current_filtered (void);
@@ -440,7 +472,21 @@ void TIM1_UPD_OVF_TRG_BRK_IRQHandler(void) __interrupt(TIM1_UPD_OVF_TRG_BRK_IRQH
   ui8_hall_sensors = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
   if (ui8_hall_sensors != ui8_hall_sensors_last)
   {
-    if ((ui8_hall_sensors == 0) || (ui8_hall_sensors == 7)) { goto hall_done; } // invalid state: ignore
+    if ((ui8_hall_sensors == 0) || (ui8_hall_sensors == 7))
+    {
+      // invalid state (broken wire, missing hall supply). Short glitches at an edge are ignored; if it lasts
+      // 0.5 ms the angle is unknown: switch the PWM off (the frozen angle gave 40+ A spikes until the blocked
+      // motor protection after 2 s). Recovered in motor_controller () once the halls are valid again.
+      if (ui8_hall_invalid_counter < 255) { ui8_hall_invalid_counter++; }
+      if (ui8_hall_invalid_counter == 8)
+      {
+        ui8_motor_controller_state |= MOTOR_CONTROLLER_STATE_HALL_ERROR;
+        TIM1->BKR &= (uint8_t) ~TIM1_BKR_MOE;
+        ui8_motor_controller_error = MOTOR_CONTROLLER_ERROR_HALL;
+      }
+      goto hall_done;
+    }
+    ui8_hall_invalid_counter = 0;
 
     ui8_previous_state = ui8_hall_sensors_last;
     ui8_hall_sensors_last = ui8_hall_sensors;
@@ -499,6 +545,8 @@ void TIM1_UPD_OVF_TRG_BRK_IRQHandler(void) __interrupt(TIM1_UPD_OVF_TRG_BRK_IRQH
         }
       }
       ui8_flag_foc_read_id_current_2 = 1; // second FOC sample, 180 deg after the first
+      ui8_phase_b_peak = ui8_phase_b_peak_running;
+      ui8_phase_b_peak_running = 0;
     }
     else if (ui8_hall_sensors == 6)
     {
@@ -563,19 +611,27 @@ hall_done:
   ui8_sinewave_table_index = ui8_motor_rotor_angle + ui8_angle_correction;
 
   /****************************************************************************/
+  // peak phase B current per revolution
+  ui8_temp = UI8_ADC_PHASE_B_CURRENT;
+  ui8_temp = (ui8_temp > PHASE_B_ZERO) ? (ui8_temp - PHASE_B_ZERO) : (PHASE_B_ZERO - ui8_temp);
+  if (ui8_temp > ui8_phase_b_peak_running) { ui8_phase_b_peak_running = ui8_temp; }
+
   // FOC: the phase B current must cross zero at a known angle. Read it there, at both zero crossings,
   // and move the angle correction until it does (Id = 0)
+  // Only while motoring (battery current > 1 A): with regen current the phase current has the opposite sign
+  // and the correction ran the wrong way (the current angle swung through +-90 deg in the simulation).
   ui8_temp = ui8_motor_rotor_angle - kt_settings.ui8_rotor_offset_angle; // angle relative to the halls
-  if (ui16_motor_speed_erps > kt_settings.ui8_erps_interpolation)
+  if ((ui16_motor_speed_erps > kt_settings.ui8_erps_interpolation) &&
+      (UI8_ADC_MOTOR_TOTAL_CURRENT > (uint8_t) (ui8_motor_total_current_offset + 2)))
   {
-    if (ui8_flag_foc_read_id_current && (ui8_temp >= kt_settings.ui8_foc_angle_adjust))
+    if (ui8_flag_foc_read_id_current && (ui8_temp >= ui8_foc_adjust_effective))
     {
       ui8_flag_foc_read_id_current = 0;
       ui8_adc_id_current = UI8_ADC_PHASE_B_CURRENT;
       if (ui8_adc_id_current > FOC_ID_ZERO_HIGH) { ui8_angle_correction++; }
       else if (ui8_adc_id_current < FOC_ID_ZERO_LOW) { ui8_angle_correction--; }
     }
-    if (ui8_flag_foc_read_id_current_2 && ((uint8_t) (ui8_temp - 128) >= kt_settings.ui8_foc_angle_adjust))
+    if (ui8_flag_foc_read_id_current_2 && ((uint8_t) (ui8_temp - 128) >= ui8_foc_adjust_effective))
     {
       ui8_flag_foc_read_id_current_2 = 0;
       ui8_adc_id_current = UI8_ADC_PHASE_B_CURRENT;
@@ -651,8 +707,8 @@ hall_done:
   TIM1->CCR3H = (uint8_t) (ui16_value_b >> 8);
   TIM1->CCR3L = (uint8_t) ui16_value_b;
 
-  // enable PWM signals only when MOTOR_CONTROLLER_STATE_OK
-  if (ui8_motor_controller_state == MOTOR_CONTROLLER_STATE_OK)
+  // enable PWM signals only when MOTOR_CONTROLLER_STATE_OK (and not coasting)
+  if ((ui8_motor_controller_state == MOTOR_CONTROLLER_STATE_OK) && !ui8_coasting)
   {
     TIM1->BKR |= TIM1_BKR_MOE;
   }
@@ -747,26 +803,180 @@ hall_done:
 // called every 100ms
 void motor_controller (void)
 {
+  save_learned ();
   do_over_current_recovery ();
+  do_hall_error_recovery ();
   do_motor_state_machine ();
   do_battery_voltage_protection ();
   ui16_duty_cycle_speed_controller = motor_speed_controller ();
+}
+
+// soft speed limit: the current target goes down linearly over the last 4 % (1 km/h at 25 km/h) below the
+// speed target, so the speed settles at the limit instead of overshooting it (the integrating speed limiter
+// below needed seconds and the speed went 1.2 km/h over the limit in the simulation).
+// Speed in 1/10 erps from the revolution time (the integer erps has 0.6 km/h steps at 25 km/h).
+static uint16_t soft_speed_limit (uint16_t ui16_target_current)
+{
+  uint16_t ui16_erps_x10 = ui16_erps_x10_filtered;
+  uint16_t ui16_limit_x10;
+  uint16_t ui16_band;
+
+  if (ui16_target_erps < 5) { return ui16_target_current; }
+  ui16_limit_x10 = ((ui16_target_erps > MOTOR_OVER_SPEED_ERPS) ? MOTOR_OVER_SPEED_ERPS : ui16_target_erps) * 10;
+  ui16_band = ui16_limit_x10 / 25;
+  if (ui16_erps_x10 >= ui16_limit_x10) { return 0; }
+  if (ui16_erps_x10 + ui16_band <= ui16_limit_x10) { return ui16_target_current; }
+  return (uint16_t) (((uint32_t) ui16_target_current * (ui16_limit_x10 - ui16_erps_x10)) / ui16_band);
+}
+
+// geared motor (freewheel) with no current requested: switch the PWM off after 400 ms. The motor spins down
+// freely instead of being held at its no load speed by the PWM (idle current, noise). Direct drive motors keep
+// the PWM on: there the current controller holds 0 A, switching off would leave the motor uncontrolled.
+static void do_coasting (uint16_t ui16_target_current)
+{
+  if (settings_flag (KT_FLAG_DIRECT_DRIVE) || ui16_target_current ||
+      motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_BRAKE))
+  {
+    ui8_coast_counter = 0;
+    if (ui8_coasting && !motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_BRAKE))
+    {
+      // the motor may still spin: start at the duty cycle that matches its back-EMF. Starting at 0 shorted
+      // the spinning motor (20 A phase current in the simulation)
+      uint32_t ui32_duty = 0;
+      if (ui16_motor_speed_erps > 15) { ui32_duty = ((uint32_t) ui16_motor_speed_erps * ui16_emf_duty_per_erps_x256) >> 8; }
+      if (ui32_duty > PWM_DUTY_MAX) { ui32_duty = PWM_DUTY_MAX; }
+      ui16_duty_cycle = (uint16_t) ui32_duty;
+      ui16_duty_cycle_target = (uint16_t) ui32_duty;
+      ui8_coasting = 0;
+    }
+    return;
+  }
+  if (ui8_coast_counter < 40) { ui8_coast_counter++; return; } // 400 ms: the back-EMF constant is learned after 300 ms
+  if (!ui8_coasting)
+  {
+    ui8_coasting = 1;
+    TIM1->BKR &= (uint8_t) ~TIM1_BKR_MOE;
+    ui16_duty_cycle = 0;
+    ui16_duty_cycle_target = 0;
+  }
 }
 
 // called every 10ms: current measurement and current controller
 void motor_fast_controller (void)
 {
   uint16_t ui16_target;
+  uint16_t ui16_target_current;
 
   calc_motor_current_filtered ();
   do_hall_learning (); // one revolution per call at most: learns in a few seconds of steady riding
+  calc_speed_and_emf ();
+
+  ui16_target_current = soft_speed_limit (ui16_target_current_10b);
+  do_coasting (ui16_target_current);
+
 #if defined (EBIKE_THROTTLE_TYPE_THROTTLE_PAS_PWM_DUTY_CYCLE)
   ui16_target = ui16_pwm_duty_cycle_duty_cycle_controller;
 #else
-  ui16_target = motor_current_controller ();
+  ui16_target = motor_current_controller (ui16_target_current);
 #endif
   if (ui16_duty_cycle_speed_controller < ui16_target) { ui16_target = ui16_duty_cycle_speed_controller; }
+
+  // phase current without battery current: the duty cycle is far below the back-EMF (power on while rolling,
+  // restart after the PWM was off, direct drive), the motor brakes into its windings. With 0 A requested the
+  // current controller sees ~0 A and stays there. Raise the duty cycle quickly until the phase current is gone.
+  if (!ui8_coasting && (ui8_phase_b_peak > PHASE_B_SHORTED) && (i16_motor_current_filtered_10b < 4) &&
+      (ui16_motor_speed_erps > 30) && !motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_BRAKE))
+  {
+    if (ui16_target < ui16_duty_cycle + 16) { ui16_target = ui16_duty_cycle + 16; }
+    i16_current_pi_fraction = 0;
+  }
+
+  // brake: the brake wins over throttle and PAS. With a direct drive motor the duty cycle ramps down and the
+  // regen limit in the PWM interrupt holds the regen current (before, the brake interrupt set the target to 0
+  // once and the controllers restored it: no regen, and the motor kept pushing with the throttle held)
+  if (motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_BRAKE))
+  {
+    // regen: the battery current is duty cycle x phase current. Below half the back-EMF duty cycle the
+    // phase current still rises but the battery current falls: at 0 the motor is shorted (it brakes, but
+    // into its windings, and the regen limit no longer sees it). So stop at half the back-EMF duty cycle.
+    // Without a known back-EMF constant or without regen: PWM off (the regen limit on the battery current
+    // oscillated between motoring and braking in the simulation).
+    ui16_target = (uint16_t) ((((uint32_t) ui16_motor_speed_erps * ui16_emf_duty_per_erps_x256) >> 8) / 2);
+    if (ui16_target > PWM_DUTY_MAX) { ui16_target = PWM_DUTY_MAX; }
+    if (!kt_settings.ui8_regen_current_a || !ui16_emf_duty_per_erps_x256 || (ui16_motor_speed_erps <= 30))
+    {
+      ui16_target = 0;
+      ui16_duty_cycle = 0;
+      ui8_brake_pwm_off = 1;
+      TIM1->BKR &= (uint8_t) ~TIM1_BKR_MOE;
+    }
+    i16_current_pi_fraction = 0;
+  }
+  else if (ui8_brake_pwm_off)
+  {
+    // brake released after PWM off: start at the duty cycle that matches the spinning motor
+    ui8_brake_pwm_off = 0;
+    ui16_duty_cycle = (ui16_motor_speed_erps > 15) ?
+                      (uint16_t) ((((uint32_t) ui16_motor_speed_erps * ui16_emf_duty_per_erps_x256) >> 8)) : 0;
+    if (ui16_duty_cycle > PWM_DUTY_MAX) { ui16_duty_cycle = PWM_DUTY_MAX; }
+    ui16_target = ui16_duty_cycle;
+  }
   motor_set_pwm_duty_cycle_target (ui16_target);
+}
+
+// speed in 1/10 erps (low pass) and the back-EMF constant, every 10 ms
+void calc_speed_and_emf (void)
+{
+  uint16_t ui16_total = ui16_PWM_cycles_counter_total;
+  uint16_t ui16_x10 = 0;
+  uint16_t ui16_k;
+
+  if ((ui16_total != 0) && (ui16_total != 0xffff)) { ui16_x10 = (uint16_t) (156250UL / ui16_total); }
+  // 1/8 per 10 ms: 80 ms time constant, averages the 2 % steps of the revolution time in PWM cycles
+  ui16_erps_x10_filtered = ui16_erps_x10_filtered - (ui16_erps_x10_filtered >> 3) + (ui16_x10 >> 3);
+  if (ui16_x10 == 0) { ui16_erps_x10_filtered = 0; }
+
+  // FOC sample delay compensation: the sample angle moves with the speed by the angle the rotor turns in
+  // delay_us (erps * 256 * delay). The fixed sample angle is only exact at one speed. Signed, 0 = off: in the
+  // motor simulator the best value depended on the assumed sensor filter (tune it on the real controller).
+  {
+    int16_t i16_comp = (int16_t) (((int32_t) ui16_motor_speed_erps * kt_settings.i8_foc_delay_x4us) / 977);
+    if (i16_comp > 64) { i16_comp = 64; }
+    if (i16_comp < -64) { i16_comp = -64; }
+    ui8_foc_adjust_effective = (uint8_t) (kt_settings.ui8_foc_angle_adjust + i16_comp);
+  }
+
+  // back-EMF constant: only after 300 ms with no current requested (the current filter has settled) and
+  // ~0 A (within 1 A), sine wave mode, PWM on, not braking
+  if (ui16_target_current_10b) { ui8_zero_target_ticks = 0; }
+  else if (ui8_zero_target_ticks < 255) { ui8_zero_target_ticks++; }
+  if ((ui8_zero_target_ticks >= 30) && (ui16_motor_speed_erps > 30) &&
+      (ui8_motor_commutation_type == SINEWAVE_INTERPOLATION_60_DEGREES) &&
+      !ui8_coasting && (ui8_motor_controller_state == MOTOR_CONTROLLER_STATE_OK) &&
+      // fast 8 bit reading (the 10 bit filter lags 160 ms): within +-1 A of zero
+      (ui8_adc_motor_total_current <= (uint8_t) (ui8_motor_total_current_offset + 2)) &&
+      (ui8_adc_motor_total_current + 2 >= ui8_motor_total_current_offset) && ui16_duty_cycle &&
+      (ui8_phase_b_peak < PHASE_B_SMALL))
+  {
+    ui16_k = (uint16_t) (((uint32_t) ui16_duty_cycle << 8) / ui16_motor_speed_erps);
+    if (ui16_emf_duty_per_erps_x256 == 0) { ui16_emf_duty_per_erps_x256 = ui16_k; }
+    else { ui16_emf_duty_per_erps_x256 = ui16_emf_duty_per_erps_x256 - (ui16_emf_duty_per_erps_x256 >> 3) + (ui16_k >> 3); }
+  }
+}
+
+// hall error: once the halls are valid again and the throttle is released, start again from 0
+void do_hall_error_recovery (void)
+{
+  uint8_t ui8_halls;
+
+  if (!motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_HALL_ERROR)) { return; }
+  ui8_halls = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
+  if ((ui8_halls == 0) || (ui8_halls == 7) || !ebike_app_is_throttle_released ()) { return; }
+  ui16_duty_cycle = 0;
+  ui16_duty_cycle_target = 0;
+  ui8_hall_invalid_counter = 0;
+  motor_controller_reset_state (MOTOR_CONTROLLER_STATE_HALL_ERROR);
+  motor_controller_clear_error ();
 }
 
 // the hardware over current trip used to latch until power off: retry after 1 s with the throttle
@@ -887,7 +1097,17 @@ void motor_init (void)
   motor_set_current_max (kt_settings.ui8_motor_current_a * 2);
   motor_set_regen_current_max (4);
   // the duty cycle has twice the steps now (9 bit): half the time per step keeps the same ramp
-  motor_set_pwm_duty_cycle_ramp_up_inverse_step (PWM_DUTY_CYCLE_RAMP_UP_INVERSE_STEP / 2); // each step = 64us
+  if (kt_settings.ui8_ramp_x10)
+  {
+    // time 0 -> full duty cycle (508 steps): 0.1 s = 1562 PWM cycles = 3.08 per step
+    motor_set_pwm_duty_cycle_ramp_up_inverse_step (((uint16_t) kt_settings.ui8_ramp_x10 * 40) / 13);
+  }
+  else
+  {
+    motor_set_pwm_duty_cycle_ramp_up_inverse_step (PWM_DUTY_CYCLE_RAMP_UP_INVERSE_STEP / 2); // each step = 64us
+  }
+  load_learned ();
+  ui8_foc_adjust_effective = kt_settings.ui8_foc_angle_adjust;
   motor_set_pwm_duty_cycle_ramp_down_inverse_step (PWM_DUTY_CYCLE_RAMP_DOWN_INVERSE_STEP / 2); // each step = 64us
 }
 
@@ -964,6 +1184,9 @@ uint16_t motor_speed_controller (void)
 
   if (ui16_target_erps > MOTOR_OVER_SPEED_ERPS) { i16_error = MOTOR_OVER_SPEED_ERPS - (int16_t) ui16_motor_speed_erps; }
   else { i16_error = (int16_t) ui16_target_erps - (int16_t) ui16_motor_speed_erps; }
+  // below the limit: no limit from here. As an integrator it held the duty cycle back to +2 per 100 ms
+  // even 30 erps below the limit (slow approach, then overshoot)
+  if (i16_error >= 0) { return PWM_DUTY_MAX; }
 
   i16_output = i16_error * MOTOR_SPEED_CONTROLLER_KP;
   if (i16_output > MOTOR_SPEED_CONTROLLER_OUTPUT_MAX) i16_output = MOTOR_SPEED_CONTROLLER_OUTPUT_MAX;
@@ -978,7 +1201,7 @@ uint16_t motor_speed_controller (void)
 
 // call every 10ms: PI (velocity form) on the battery current, output is an absolute duty cycle (9 bit).
 // Integral part per 100 ms is the same as the original integrator, the proportional part damps it.
-uint16_t motor_current_controller (void)
+uint16_t motor_current_controller (uint16_t ui16_target_current)
 {
   int16_t i16_error;
   int16_t i16_motor_current;
@@ -988,7 +1211,7 @@ uint16_t motor_current_controller (void)
   i16_motor_current = i16_motor_current_filtered_10b;
   if (i16_motor_current < 0) { i16_motor_current = 0; } // regen is not controlled here
 
-  i16_error = ((int16_t) ui16_target_current_10b) - i16_motor_current;
+  i16_error = ((int16_t) ui16_target_current) - i16_motor_current;
   if (i16_error > 400) { i16_error = 400; }
   if (i16_error < -400) { i16_error = -400; }
 
@@ -998,7 +1221,7 @@ uint16_t motor_current_controller (void)
   i16_delta = i16_current_pi_fraction / 16;
   i16_current_pi_fraction -= i16_delta * 16;
 
-  if (ui16_target_current_10b == 0) { i16_current_pi_fraction = 0; }
+  if (ui16_target_current == 0) { i16_current_pi_fraction = 0; }
 
   i16_output = (int16_t) ui16_duty_cycle + i16_delta;
   if (i16_output > PWM_DUTY_MAX) i16_output = PWM_DUTY_MAX;
@@ -1140,4 +1363,66 @@ void EXTI_PORTD_IRQHandler(void) __interrupt(EXTI_PORTD_IRQHANDLER)
   motor_controller_set_state (MOTOR_CONTROLLER_STATE_OVER_CURRENT);
   motor_disable_PWM ();
   motor_controller_set_error (MOTOR_CONTROLLER_ERROR_06_SHORT_CIRCUIT);
+}
+
+static void learned_block (uint8_t *p)
+{
+  uint8_t ui8_i;
+  uint8_t ui8_sum = 0;
+  p[0] = 'L';
+  for (ui8_i = 0; ui8_i < 6; ui8_i++) { p[1 + ui8_i] = (uint8_t) i8_hall_offset[ui8_learn_order[ui8_i]]; }
+  p[7] = (uint8_t) (ui16_emf_duty_per_erps_x256 >> 8);
+  p[8] = (uint8_t) ui16_emf_duty_per_erps_x256;
+  for (ui8_i = 0; ui8_i < 9; ui8_i++) { ui8_sum += p[ui8_i]; }
+  p[9] = (uint8_t) ~ui8_sum;
+}
+
+void load_learned (void)
+{
+  uint8_t ui8_i;
+  uint8_t ui8_sum = 0;
+  int8_t i8_off;
+  for (ui8_i = 0; ui8_i < 10; ui8_i++) { ui8_learned_saved[ui8_i] = *((volatile uint8_t *) (LEARNED_ADDRESS + ui8_i)); }
+  for (ui8_i = 0; ui8_i < 9; ui8_i++) { ui8_sum += ui8_learned_saved[ui8_i]; }
+  if ((ui8_learned_saved[0] != 'L') || ((uint8_t) ~ui8_sum != ui8_learned_saved[9])) { return; }
+  if (!settings_flag (KT_FLAG_NO_HALL_LEARNING))
+  {
+    for (ui8_i = 0; ui8_i < 6; ui8_i++)
+    {
+      i8_off = (int8_t) ui8_learned_saved[1 + ui8_i];
+      if ((i8_off > 20) || (i8_off < -20)) { i8_off = 0; }
+      i8_hall_offset[ui8_learn_order[ui8_i]] = i8_off;
+      i16_hall_offset_x16[ui8_learn_order[ui8_i]] = ((int16_t) i8_off) * 16;
+    }
+  }
+  ui16_emf_duty_per_erps_x256 = (((uint16_t) ui8_learned_saved[7]) << 8) | ui8_learned_saved[8];
+}
+
+// every 100 ms: after 2 s at standstill, write the learned values if they changed (at most once per stop)
+void save_learned (void)
+{
+  uint8_t ui8_new[10];
+  uint8_t ui8_i;
+  uint8_t ui8_changed = 0;
+  uint16_t ui16_old;
+  uint16_t ui16_diff;
+
+  if (ui16_motor_speed_erps) { ui8_standstill_ticks = 0; ui8_learned_written_this_stop = 0; return; }
+  if (ui8_standstill_ticks < 20) { ui8_standstill_ticks++; return; }
+  if (ui8_learned_written_this_stop) { return; }
+  ui8_learned_written_this_stop = 1;
+
+  learned_block (ui8_new);
+  for (ui8_i = 1; ui8_i < 7; ui8_i++) { if (ui8_new[ui8_i] != ui8_learned_saved[ui8_i]) { ui8_changed = 1; } }
+  // back-EMF constant: only a change of more than 1/32 (the filtered value moves a little all the time)
+  ui16_old = (((uint16_t) ui8_learned_saved[7]) << 8) | ui8_learned_saved[8];
+  ui16_diff = (ui16_old > ui16_emf_duty_per_erps_x256) ? (ui16_old - ui16_emf_duty_per_erps_x256) :
+                                                        (ui16_emf_duty_per_erps_x256 - ui16_old);
+  if (ui16_diff > (ui16_old >> 5)) { ui8_changed = 1; }
+  if (ui8_learned_saved[0] != 'L') { ui8_changed = 1; }
+  if (!ui8_changed) { return; }
+#ifndef SIMULATION // ucsim never reports the end of an EEPROM write
+  eeprom_write_bytes (LEARNED_ADDRESS, ui8_new, 10);
+#endif
+  for (ui8_i = 0; ui8_i < 10; ui8_i++) { ui8_learned_saved[ui8_i] = ui8_new[ui8_i]; }
 }
