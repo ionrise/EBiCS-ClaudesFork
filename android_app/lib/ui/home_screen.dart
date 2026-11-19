@@ -32,7 +32,14 @@ class HomeScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          Text('Lishui controller setup', style: theme.textTheme.headlineSmall),
+          Row(children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: Image.asset('assets/ebics_logo.png', width: 64, height: 64),
+            ),
+            const SizedBox(width: 14),
+            Expanded(child: Text('Lishui controller setup', style: theme.textTheme.headlineSmall)),
+          ]),
           const SizedBox(height: 6),
           const Text('Unlock the chip, install the open source EBiCS firmware, calibrate the motor and test everything '
               '- with an ST-Link V2 on the phone\'s USB port (OTG adapter).'),
