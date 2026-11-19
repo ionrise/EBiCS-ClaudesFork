@@ -28,8 +28,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build firmware variants
-        run: python setup_app/build_variants.py --out android_app/assets/firmware
+      - name: Build firmware variants (Lishui + Kunteng)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q sdcc   # Kunteng (STM8) firmware
+          python setup_app/build_variants.py --out android_app/assets/firmware
 
       - uses: actions/setup-java@v4
         with:
@@ -85,8 +87,10 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build firmware variants
-        run: python setup_app/build_variants.py --out android_app/assets/firmware
+      - name: Build firmware variants (Lishui + Kunteng)
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q sdcc   # Kunteng (STM8) firmware
+          python setup_app/build_variants.py --out android_app/assets/firmware
 
       - name: Embed firmware + web page
         run: python esp32_flasher/gen_assets.py
