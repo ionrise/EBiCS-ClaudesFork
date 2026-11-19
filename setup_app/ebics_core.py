@@ -176,6 +176,9 @@ FIELDS = [
     ("throttle", "Throttle", "bool", True, "basic", "", "Tick if a throttle is connected."),
     ("legal_mode", "Legal mode (EU)", "bool", False, "basic", "",
      "Ramps the motor down at the speed limit and limits to 6 km/h when you don't pedal."),
+    ("current_ramp_ms", "Current ramp", "int", 300, "basic", "ms",
+     "Time to rise from zero to the full motor current: smoother take-off, easier on gears and freewheel. "
+     "The current drops immediately when you release the throttle or brake. 0 = no ramp."),
     ("walk_current_a", "Walk assist current", "float", 6.0, "basic", "A",
      "Motor current for the walk / push assist button."),
     ("sensorless", "Sensorless motor (no hall sensors) - experimental", "bool", False, "basic", "",
@@ -400,6 +403,7 @@ def generate_config_h(s):
     d("PH_CURRENT_MAX", units(s["phase_current_a"])); d("BATTERYCURRENT_MAX", ma(s["battery_current_a"]))
     d("REGEN_CURRENT", units(s["regen_current_a"])); d("REGEN_CURRENT_MAX", ma(s["regen_max_a"]))
     d("VOLTAGE_MIN", int(cutoff / cal_v)); d("VOLTAGE_MAX", int(vmax / cal_v)); d("SPEC_ANGLE", s["spec_angle"])
+    d("CURRENT_RAMP_MS", max(0, min(10000, int(s.get("current_ramp_ms", 300)))))
     d("BATTERYVOLTAGE_MIN", cutoff); d("BATTERYVOLTAGE_MAX", vmax)
     d("VOLTAGE_RAMP_MV", max(100, int(float(s.get("voltage_ramp_v", 1.0)) * 1000)))
     d("MOTOR_TEMPERATURE_THRESHOLD", int(s.get("motor_temp_derate", 100)))
@@ -455,7 +459,8 @@ SETTINGS_FIELDS = ["ph_current_max", "battery_current_max", "regen_current", "re
                    "pushassist_current", "ts_coef", "pas_timeout", "ramp_end", "throttle_offset", "throttle_max",
                    "motor_temp_threshold", "motor_temp_max", "frac_high", "frac_low", "reverse",
                    "speed_temp_adc", "speed_temp_threshold", "ntc_pullup_ohm",
-                   "obs_inductance", "obs_resistance", "obs_flux_linkage", "obs_gamma", "obs_angle_offset"]
+                   "obs_inductance", "obs_resistance", "obs_flux_linkage", "obs_gamma", "obs_angle_offset",
+                   "current_ramp_ms"]
 
 
 def _c_int(v):
@@ -494,7 +499,8 @@ def settings_block_values(s):
          "obs_inductance": _c_int(s["inductance"]), "obs_resistance": _c_int(s["resistance"]),
          "obs_flux_linkage": _c_int(s["flux_linkage"]), "obs_gamma": _c_int(s["gamma"]),
          "obs_angle_offset": int.from_bytes((int(round(float(s.get("obs_angle_deg", 20.0)) / 180.0 * 2 ** 31)) & 0xFFFFFFFF)
-                                            .to_bytes(4, "little"), "little", signed=True)}
+                                            .to_bytes(4, "little"), "little", signed=True),
+         "current_ramp_ms": max(0, min(10000, int(s.get("current_ramp_ms", 300))))}
     for n, mv in enumerate(bars, 1):
         v[f"battery_level_{n}"] = mv * 10
     return flags, v
@@ -687,6 +693,9 @@ LIVE_VARS = {
     "i16_hall_order": ("i16", 0),
     "ui32_KV": ("i16", 0),
     "ui8_watchdog_reset": ("u8", 0),
+    "ui8_overcurrent": ("u8", 0),
+    "ui8_oc_trips": ("u8", 0),
+    "ui8_stall_limited": ("u8", 0),
     "ui16_motor_temp_adc": ("u16", 0),
     "ui8_motor_temp_sensor_ok": ("u8", 0),
     "ui8_sensorless_running": ("u8", 0),

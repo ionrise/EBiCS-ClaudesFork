@@ -76,6 +76,8 @@ const fields = <Field>[
   Field('throttle', 'Throttle', FieldKind.boolean, true, 'basic', help: 'On if a throttle is connected.'),
   Field('legal_mode', 'Legal mode (EU)', FieldKind.boolean, false, 'basic',
       help: "Ramps the motor down at the speed limit and limits to 6 km/h when you don't pedal."),
+  Field('current_ramp_ms', 'Current ramp', FieldKind.integer, 300, 'basic', unit: 'ms',
+      help: 'Time to rise from zero to the full motor current (smoother take-off). Drops at once when released. 0 = no ramp.'),
   Field('walk_current_a', 'Walk assist current', FieldKind.decimal, 6.0, 'basic',
       unit: 'A', help: 'Motor current for the walk / push assist button.'),
   Field('sensorless', 'Sensorless motor (no hall sensors) - experimental', FieldKind.boolean, false, 'basic',

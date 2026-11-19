@@ -73,7 +73,8 @@ typedef struct {
 	int32_t obs_flux_linkage;       // 144  (FLUX_LINKAGE)
 	int32_t obs_gamma;              // 148  (GAMMA, shift)
 	int32_t obs_angle_offset;       // 152  q31 (OBS_ANGLE_OFFSET)
-	uint32_t reserved[24];          // 156  0
+	int32_t current_ramp_ms;        // 156  ms from 0 to full phase current, 0 = no ramp (CURRENT_RAMP_MS)
+	uint32_t reserved[23];          // 160  0
 	uint32_t crc;                   // 252  CRC-32 (IEEE, like zlib) of bytes 0..251
 } ebics_settings_t;
 

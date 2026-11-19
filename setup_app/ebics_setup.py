@@ -544,7 +544,8 @@ class LivePage(Page):
              ("battery_a", "Battery current", "A"), ("pas", "Pedal pulses", ""), ("halls", "Hall events", ""),
              ("temp", "Controller temp", "\u00b0C"), ("calibrated", "Motor calibrated", ""), ("kv", "KV", ""),
              ("motor_temp", "Motor temp", "\u00b0C"), ("wire_raw", "Speed/temp wire (raw ADC)", ""),
-             ("sensorless", "Sensorless observer", ""), ("watchdog", "Last reset", "")]
+             ("sensorless", "Sensorless observer", ""), ("watchdog", "Last reset", ""),
+             ("protection", "Protection", "")]
 
     def __init__(self, master, app):
         super().__init__(master, app)
@@ -615,6 +616,10 @@ class LivePage(Page):
             put("wire_raw", str(snap.get(f"adc{st_idx}", "-")) if st_idx else "not used")
             put("sensorless", ("running" if snap.get("ui8_sensorless_running") else "stopped / start") if s.get("sensorless") else "off (hall)")
             put("watchdog", "WATCHDOG" if snap.get("ui8_watchdog_reset") else "normal")
+            trips = snap.get("ui8_oc_trips") or 0
+            put("protection", ("OVERCURRENT" if snap.get("ui8_overcurrent") else
+                               "STALL LIMIT" if snap.get("ui8_stall_limited") else "ok")
+                + (f"  ({trips} trips)" if trips else ""))
             if snap.get("ui32_setup_magic") != core.SETUP_MAGIC:
                 self.status.configure(text="old firmware on the controller - install the new one for all values", foreground=WARN)
             ang = core.hall_angles_deg(snap)
