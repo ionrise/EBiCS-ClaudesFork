@@ -172,6 +172,19 @@ void main() {
     expect(b[31], ~sum & 0xFF);
   });
 
+  test('display choices match the firmware (kunteng/display.h DISPLAY_LAST)', () {
+    final h = File('../kunteng/display.h');
+    final codes = [for (final (_, c) in ktChoices['display']!) c];
+    if (h.existsSync()) {
+      final last = int.parse(RegExp(r'#define DISPLAY_LAST\s+(\d+)').firstMatch(h.readAsStringSync())!.group(1)!);
+      expect(codes, List.generate(last + 1, (i) => i));
+    }
+    for (final c in codes) {
+      final s = KtSettings.defaults()..values['display'] = c;
+      expect(s.block()[23], c);
+    }
+  });
+
   test('unlock, install and settings over SWIM on the simulated chip', () async {
     final chip = FakeStm8(locked: true);
     final fw = Uint8List.fromList([for (var i = 0; i < 1000; i++) (i * 7 + 3) & 0xFF]);

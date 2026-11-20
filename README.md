@@ -13,7 +13,7 @@ Both are programmed with the same cheap **ST-Link V2**. Lishui controllers can a
 A fork of [EBiCS/EBiCS_Firmware](https://github.com/EBiCS/EBiCS_Firmware), the open source FOC firmware for
 Lishui e-bike controllers (STM32F103). For Lishui this fork adds a **simple setup app with a step-by-step first-setup
 wizard**, fixes a number of **firmware bugs**, adds **two more display protocols**, an experimental
-**sensorless** mode, **speed + motor temperature on one wire**, **custom battery voltages with soft current ramps**,
+**sensorless** mode, **speed + motor temperature on one wire**, **custom battery voltages with soft current ramps**, **field weakening**,
 and an **Android app** that does the whole setup from a phone with an ST-Link V2 on USB OTG.
 Both apps also set up **Kunteng (KT) controllers** (STM8S105) with the open source KT firmware in
 [`kunteng/`](kunteng/README.md): choose Lishui or Kunteng on the start screen.
@@ -114,6 +114,18 @@ the raw ADC value and the motor temperature for tuning.
   mode: PAS, throttle, walk assist, display and VESC commands.
 - Both ramps use the same width, *Soft voltage ramp width* (default 1.0 V). Battery bars follow the two voltages.
 
+**Field weakening** (advanced settings *Field weakening: ...*, off by default): more top speed once the battery
+voltage is used up. Like VESC it adds a negative d current, but closed loop: the firmware keeps the voltage the
+current controllers ask for at *voltage use* (default 90 %) of the maximum and moves the d current, at most *max
+current* per *ramp*, only as far as that needs. So it gives just enough weakening for the load, and it works while
+braking too: above the base speed the regen current stays controlled. Without it, asking for current above the base speed
+gave uncontrolled regen in the simulation (22 A into the battery when 20 A of drive were asked). d and q current
+together stay within the phase current, and while motoring the weakening goes back when the battery current is
+over *battery current* (0 = the normal limit). The PWM stays on while weakening (no coasting). Motor simulator
+(`python tools/motor_sim.py --fw`): top speed 0.91 x base without, 1.35 x with 15 A and 1.92 x with 25 A of weakening.
+Live data shows the weakening current. The rotor and hall angles must be right (calibrate first): a wrong
+d axis makes the "weakening" strengthen the field instead.
+
 ### 7. Runtime settings block
 
 The numeric settings (currents, voltages, speed limit, wheel, gearing, PAS, ramps, temperatures, sensorless motor
@@ -132,9 +144,10 @@ the throttle code, so a bike without throttle got no assist).
 The apps ask at start whether you set up a **Lishui** controller (EBiCS, STM32) or a **Kunteng / KT**
 controller (STM8S105: S06S, S12S, KT36/48 ...). For KT they install casainho's open source KT firmware with
 bug fixes and motor control improvements ([`kunteng/`](kunteng/README.md), [changes](kunteng/CHANGES.md)) over
-the SWIM pin of the same ST-Link V2: own SWIM driver in both apps, no ST Visual Programmer needed. KT, KingMeter
-and Bafang displays, live data and a hall autodetect (both directions, measures the rotor offset instead of the
-fixed 202 of Q85/Q100 motors) in both apps. Settings are
+the SWIM pin of the same ST-Link V2: own SWIM driver in both apps, no ST Visual Programmer needed. All display
+protocols of the Lishui firmware (KT, KingMeter 901U and 618U, Bafang LCD / 850C, No.2, Tongsheng, VESC UART,
+EBiCS app), live data, field weakening (max angle, battery and phase current, ramp speed) and a hall
+autodetect (both directions, measures the rotor offset instead of the fixed 202 of Q85/Q100 motors) in both apps. Settings are
 read from the STM8 EEPROM at power up, so they can be changed in a second without reinstalling. The PC app needs
 SDCC to build the KT firmware (`winget install SDCC.SDCC`) and Python `pyusb` + `libusb-package` for USB (it
 offers to install them). Not tested on a real KT controller yet: test with the wheel lifted.

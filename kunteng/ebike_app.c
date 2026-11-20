@@ -90,6 +90,21 @@ void ebike_app_controller (void)
   // control the motor using specific algorithm
   if (kt_settings.ui8_throttle_type == EBIKE_THROTTLE_TYPE_TORQUE_SENSOR) { ebike_throotle_type_torque_sensor (); }
   else { ebike_throotle_type_throotle_pas (); }
+
+  // a VESC device that sends current commands replaces throttle / PAS (the brake still wins in motor.c)
+  {
+    uint16_t ui16_request = display_current_request ();
+    if (ui16_request != 0xFFFF)
+    {
+      // VESC SET_CURRENT is motor (phase) current, KT controls the battery current: battery = phase x duty cycle
+      // (same 1/4 floor at pull away as the phase current reported in COMM_GET_VALUES)
+      uint16_t ui16_duty = ui16_duty_cycle;
+      if (ui16_duty < 127) { ui16_duty = 127; }
+      if (ui16_duty < 508) { ui16_request = (uint16_t) (((uint32_t) ui16_request * ui16_duty) / 508); }
+      if (ui16_request > ui16_motor_controller_max_current_10b) { ui16_request = ui16_motor_controller_max_current_10b; }
+      motor_controller_set_target_current_10b (ui16_request);
+    }
+  }
 }
 
 // cruise control will save throttle value and use it even if user releases throttle
@@ -160,7 +175,7 @@ uint8_t throttle_is_set (void)
   return (ui8_adc_throttle_value > ADC_THROTTLE_MIN_VALUE) ? 1: 0;
 }
 
-// the display protocols (Kunteng, KingMeter, Bafang) are in display.c
+// the display protocols are in display.c
 static void communications_controller (void)
 {
   display_controller ();
@@ -314,9 +329,11 @@ uint8_t ebike_app_get_adc_throttle_value_cruise_control (void)
   return ui8_adc_throttle_value_cruise_control;
 }
 
+// an active VESC current command counts as throttle (recoveries, blocked motor, autodetect wait for its release)
 uint8_t ebike_app_is_throttle_released (void)
 {
-  return ui8_is_throotle_released;
+  uint16_t ui16_request = display_current_request ();
+  return ui8_is_throotle_released && ((ui16_request == 0xFFFF) || (ui16_request == 0));
 }
 
 uint8_t ui8_ebike_app_get_wheel_speed (void)

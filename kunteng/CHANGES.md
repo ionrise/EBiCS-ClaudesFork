@@ -75,12 +75,37 @@ stays below the setting when the winding inductance limits it (sine commutation 
 - **Live data** in both apps over SWIM without reset: battery, current, speed, duty cycle, throttle, cadence,
   assist level, states and errors, FOC correction, phase current peak, learned values.
 
+## All display protocols of the Lishui firmware
+
+Settings byte 23 (display) now 0 ... 8. Ported from the EBiCS display_*.c files to the interrupt driven
+ring buffers of display.c (the main loop never waits for the UART):
+
+| Code | Display | Taken from the display | Sent to the display |
+|---|---|---|---|
+| 4 | KingMeter J-LCD / 618U (9600) | assist level, speed limit, wheel size (8 sizes) | battery low, current, wheel time, error |
+| 5 | UART No.2: S866, EN06 ... (9600) | assist level (5 or 9 levels), wheel size (inch x10), speed limit | error (7 motor, 9 controller), brake, current, wheel time |
+| 6 | Tongsheng VLCD5 / VLCD6 / XH18 (9600) | assist level, wheel size (inch), speed limit | battery 0 ... 12, under voltage, motor working, current, wheel time |
+| 7 | VESC UART (115200) | COMM_SET_CURRENT replaces throttle / PAS until 1 s after the last command (no regen, limited to the motor current, the brake still wins); SET_DUTY / SET_CURRENT_BRAKE = no drive | COMM_FW_VERSION ("EBiCS-KT"), COMM_GET_VALUES: battery and estimated phase current (battery / duty), duty, erpm, voltage, fault (over / under voltage, short circuit) |
+| 8 | EBiCS app / BLE module (9600) | ANT+ LEV page 16: wheel circumference, assist level | pages 1 (assist level, error, speed) and 4 (battery current, voltage) in turn every 150 ms |
+
+Not on the KT controller: walk / push assist, lights (no light output), temperatures (no sensors), cruise
+control from the display. VESC has no assist level: PAS runs at level 3. The TX buffer is 128 bytes now
+(a VESC values answer is 79 bytes); the VESC CRC is calculated while sending, no packet buffer.
+Each protocol is checked in ucsim (kunteng/sim/run_sim.py): a canned display frame in, the values taken
+over and the answer framed with a correct checksum / CRC.
+
 More bugs of the original found on the way (simulator):
 
 | Where | Bug | Fix |
 |---|---|---|
 | ebike_app.c | Standstill wheel period `36000 x circumference` overflowed 16 bits above 1.82 m (26": 74250 -> 8714 ms, the display showed 0.9 km/h) | 65000 ms |
 | ebike_app.c | External speed sensor assumed connected at power on with the shortest period: ~850 km/h for 4 s | Not connected until the first pulse |
+
+Review fixes: No.2 levels above 5 stay at 5 (were scaled down to 3/4), KingMeter answers send no KT error codes
+(0x91 under voltage is the battery symbol, 0x26 meant over temperature), VESC voltage above 65 V no longer wraps,
+VESC answers wait until the whole frame fits the TX buffer, VESC SET_CURRENT is motor current (converted to
+battery current with the duty cycle), an active VESC current command counts as throttle (recoveries, blocked
+motor, autodetect, field weakening only with the throttle), shorter false header stall.
 
 ## Hall autodetect (forward + backward)
 
@@ -97,5 +122,36 @@ Checked in the motor simulator with a free rotor (true offset 190, edge errors Â
 hall hysteresis -> 191, 5 N / 4 deg -> 192, the forward-only reading would be 203 / 215; a motor that cannot
 follow is reported as failed. In ucsim (the compiled firmware with simulated halls) exactly 190 and the edge
 errors, spread 9/256.
+
+## Field weakening
+
+More top speed above the base speed of the motor (idea from VESC, adapted to the KT drive). The KT firmware
+controls the voltage (duty cycle), not the currents: the FOC correction turns the field to the angle where Id = 0.
+For field weakening the field is advanced further by `ui8_fw_angle` (negative Id, lower back-EMF).
+
+- Starts only when the voltage is used up: duty cycle at its maximum and the current controller still wants more
+  current (VESC starts at a fixed duty cycle, `fw_duty_start`, whether more is wanted or not).
+- While weakening the duty cycle stays at its maximum and the angle controls the battery current (proportional,
+  at most the ramp per 10 ms). When less is wanted the angle goes back first, then the duty cycle control takes
+  over where it is: no torque step at the hand over. The FOC correction is held while weakening.
+- Limits on measured currents: battery current while weakening, phase B peak current (the weakening current
+  flows in the motor without showing on the battery current; the S06S sensor reads up to ~15 A peak). Over a
+  limit, at the speed limit or with the throttle-only option and no throttle: angle back at 2x the ramp.
+- Brake: the angle goes back at 8x the ramp. Above the base speed the PWM stays on until the angle is 0 (PWM off
+  there would let the diodes brake uncontrolled), and while weakening more regen current than allowed holds the
+  angle (regen guard).
+- Off at once on a fault, PWM off or block commutation; only in sine wave mode; no coasting while weakening.
+- Settings (bytes 27 ... 30 of the settings block, 0 = off / default): max angle (deg), battery current (A, 0 =
+  motor current), phase current peak (A, 0 = 15), ramp (deg/s, 0 = 30, max 120), flag 0x20 only with the throttle.
+  Live data shows the angle.
+
+Motor simulator (`python tools/kt_motor_sim.py --fw`, 36 V, 15 A, flat): top speed 26.7 km/h without, 30.2 km/h
+with weakening (angle 16 deg, held by the 15 A phase limit, battery 12.3 A, Id -9.6 A); with a 10 A phase limit
+27.5 km/h. Brake while weakening at 35 km/h downhill (direct drive): drive torque gone after 70 ms, regen within
+the limit. Hand over from weakening to the duty cycle control: no step beyond the requested current change.
+The review also found and fixed: the regen guard could start weakening on its own at low speed, the brake left
+the motor driving until the angle ramped back, and the brake without regen switched the PWM off above the base
+speed. Not modelled: diode regen when the PWM is off above the base speed (true without weakening too, e.g. a
+direct drive rolling fast downhill with the brake pulled and no regen set).
 
 Removed: the 360Â° interpolation mode (was off by default, replaced by the new interpolation).

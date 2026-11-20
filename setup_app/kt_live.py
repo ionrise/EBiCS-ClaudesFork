@@ -28,6 +28,7 @@ LIVE_VARS = [
     ("ui8_coasting", "u8", "Coasting (PWM off)", "", 1),
     ("ui16_emf_duty_per_erps_x256", "u16", "Back-EMF constant", "", 1),
     ("i8_hall_offset", "i8x8", "Learned hall offsets", "/256", 1),
+    ("ui8_fw_angle", "u8", "Field weakening angle", "deg", 360 / 256),
 ]
 SIZES = {"u8": 1, "i8": 1, "u16": 2, "i16": 2, "f32": 4, "i8x8": 8, "u8x8": 8}
 

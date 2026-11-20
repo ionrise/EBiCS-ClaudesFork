@@ -133,8 +133,17 @@ def PI_control(pi, moe=True):
 
 class Firmware:
     def __init__(self, ph_current_max, battery_current_max_ma=1_000_000, regen_max_ma=0, vbat_raw=1440,
-                 sensorless=False, obs=None):
+                 sensorless=False, obs=None, fw_current_max=0, fw_battery_ma=0, fw_ramp_ms=500, fw_pct=90):
         self.ph_current_max = ph_current_max
+        # field weakening (main.c init)
+        self.fw_max = fw_current_max
+        self.fw_bat = fw_battery_ma
+        self.fw_step16 = max(1, ((fw_current_max << 16) // ((fw_ramp_ms or 500) * 16))) if fw_current_max > 0 else 0
+        self.fw_u_start = (U_MAX * (fw_pct or 90)) // 100
+        self.fw_id16 = 0
+        self.fw_id = 0
+        self.u_demand16 = 0
+        self.hall_angle_detect_flag = 1
         self.bc_max = battery_current_max_ma
         self.regen_max = regen_max_ma
         self.vbat_raw = vbat_raw
@@ -179,18 +188,38 @@ class Firmware:
                 sp, self.bc_flag = lim, 1
             if sp < -lim:
                 sp, self.bc_flag = -lim, 1
+        sp = self.field_weakening(sp)
         self.pi_iq.recent = self.i_q
         self.pi_iq.setpoint = sp
         self._pi_and_limit()
 
+    def field_weakening(self, sp):
+        """Port of the field weakening block in runPIcontrol()."""
+        running = self.obs.running if self.sensorless else True
+        if self.fw_step16 and self.i_d_setpoint == 0 and self.hall_angle_detect_flag and running:
+            e = max(-100, min(100, (self.u_demand16 >> 4) - self.fw_u_start))
+            if not self.brake and self.battery_current > (self.fw_bat or self.bc_max):
+                e = -100
+            self.fw_id16 -= cdiv(self.fw_step16 * e, 100)
+            self.fw_id16 = max(-(self.fw_max << 16), min(0, self.fw_id16))
+        else:
+            self.fw_id16 = 0
+        self.fw_id = asr(self.fw_id16, 16)
+        if self.fw_id:
+            r2 = self.ph_current_max * self.ph_current_max - self.fw_id * self.fw_id
+            iq_max = math.isqrt(r2) if r2 > 0 else 0
+            sp = max(-iq_max, min(iq_max, sp))
+        return sp
+
     def _pi_and_limit(self):
         uq = PI_control(self.pi_iq)
         self.pi_id.recent = self.i_d
-        self.pi_id.setpoint = self.i_d_setpoint
+        self.pi_id.setpoint = self.i_d_setpoint + self.fw_id
         ud = -PI_control(self.pi_id)
         s = w32(w32(ud * ud, "u_d^2") + w32(uq * uq, "u_q^2"), "u_d^2+u_q^2")
         s = w32(s << 1, "(u_d^2+u_q^2)<<1")
         self.u_abs = asr(sqrt_q31(s), 16) + 1
+        self.u_demand16 += self.u_abs - (self.u_demand16 >> 4)
         if self.u_abs > U_MAX:
             self.u_q = cdiv(w32(uq * U_MAX, "u_q*_U_MAX"), self.u_abs)
             self.u_d = cdiv(w32(ud * U_MAX, "u_d*_U_MAX"), self.u_abs)
@@ -588,7 +617,7 @@ def run(motor, fw, seconds, setpoint_fn, vbat=36.0, current_sign=-1, angle_mode=
             row = dict(t=t, iq_true=motor.iq, id_true=motor.id, w=motor.w, sp=fw.i_q_setpoint * CAL_I / 1000,
                        iq_fw=fw.i_q * CAL_I / 1000, id_fw=fw.i_d * CAL_I / 1000, u_abs=fw.u_abs,
                        ibat_fw=fw.battery_current / 1000, ibat_true=i_dc, bc=fw.bc_flag,
-                       iph_peak=math.hypot(motor.id, motor.iq))
+                       iph_peak=math.hypot(motor.id, motor.iq), fw_id=fw.fw_id * CAL_I / 1000)
             if fw.sensorless:
                 row["obs_err"] = ang_err_deg(fw.obs.teta, motor.theta + angle_offset)
                 row["obs_running"] = fw.obs.running
@@ -617,6 +646,41 @@ def fmt(s):
 
 
 # ----------------------------------------------------------------------------------------------- scenarios
+def fw_scenarios(SIGN, OFF, R, L, lam, w_noload):
+    print("\n=== 11. field weakening: dyno above the base speed, 20 A asked (phase max 30 A)")
+    for frac in (0.9, 1.1, 1.3, 1.6):
+        for fw_a in (0, 15, 25):
+            FINDINGS.clear()
+            m = Motor(R, L, lam, w=frac * w_noload)
+            fw = Firmware(amps_to_units(30), fw_current_max=amps_to_units(fw_a), fw_ramp_ms=200)
+            rows = run(m, fw, 0.5, lambda t: amps_to_units(20), current_sign=SIGN, angle_offset=OFF)
+            s = summary(rows, 0.4, ("iq_true", "id_true", "u_abs", "ibat_true", "iph_peak"))
+            print(f"  speed {frac:4.2f} x base, weakening max {fw_a:2d} A: iq {s['iq_true'][1]:6.1f} A  id {s['id_true'][1]:6.1f} A  "
+                  f"phase {s['iph_peak'][2]:5.1f} A  u_abs {s['u_abs'][1]:6.0f}  battery {s['ibat_true'][1]:5.1f} A  "
+                  f"findings: {dict(FINDINGS) or '-'}")
+
+    print("\n=== 11b. field weakening: free running, full current 20 A (phase max 30 A), 1.5 s: top speed")
+    for fw_a, bat in ((0, 0), (15, 0), (25, 0), (25, 6), (25, 14)):
+        FINDINGS.clear()
+        m = Motor(R, L, lam, J=2e-5, load=0.12, w=0.8 * w_noload, theta=0.3)
+        fw = Firmware(amps_to_units(30), fw_current_max=amps_to_units(fw_a), fw_battery_ma=bat * 1000, fw_ramp_ms=200)
+        rows = run(m, fw, 1.5, lambda t: amps_to_units(20), current_sign=SIGN, angle_offset=OFF)
+        s = summary(rows, 1.3, ("iq_true", "id_true", "ibat_true", "iph_peak"))
+        print(f"  weakening max {fw_a:2d} A{', battery ' + str(bat) + ' A' if bat else '':12s}: speed {rows[-1]['w'] / w_noload:4.2f} x base, "
+              f"iq {s['iq_true'][1]:5.1f} A, id {s['id_true'][1]:6.1f} A, phase peak {s['iph_peak'][2]:5.1f} A, "
+              f"battery {s['ibat_true'][1]:5.1f} A  findings: {dict(FINDINGS) or '-'}")
+
+    print("\n=== 11c. regen above the base speed: dyno at 1.4 x base, -10 A asked (brake), weakening 25 A / off")
+    for fw_a in (0, 25):
+        FINDINGS.clear()
+        m = Motor(R, L, lam, w=1.4 * w_noload)
+        fw = Firmware(amps_to_units(30), regen_max_ma=10000, fw_current_max=amps_to_units(fw_a), fw_ramp_ms=200)
+        rows = run(m, fw, 0.5, lambda t: amps_to_units(-10), current_sign=SIGN, angle_offset=OFF, brake_fn=lambda t: 1)
+        s = summary(rows, 0.4, ("iq_true", "id_true", "ibat_true", "iph_peak"))
+        print(f"  weakening max {fw_a:2d} A: iq {s['iq_true'][1]:6.1f} A (asked -10), id {s['id_true'][1]:6.1f} A, "
+              f"battery {s['ibat_true'][1]:6.1f} A, phase peak {s['iph_peak'][2]:5.1f} A  findings: {dict(FINDINGS) or '-'}")
+
+
 def main():
     report = []
 
@@ -644,6 +708,11 @@ def main():
         print("  no stable convention found - model mapping wrong"); return
     SIGN, OFF, DIR = best   # DIR: electrical direction a positive setpoint drives the motor
     print(f"  using current sign {SIGN:+d}, angle offset {math.degrees(OFF):.0f} deg")
+    if "--fw" in sys.argv:   # only the field weakening scenarios
+        # the firmware frame after the hall autodetect: +d = magnet axis (the autodetect pulls the rotor with +Id),
+        # in this model that is the convention offset + 180 deg (see autodetect_sim), and the direction flips with it
+        fw_scenarios(SIGN, OFF + math.pi, R, L, lam, -w_noload * DIR)
+        return
 
     # 1. locked rotor, current up to the maximum the ADC can measure
     section("1. locked rotor, current steps (hall/ideal angle)")

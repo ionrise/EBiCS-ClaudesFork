@@ -126,6 +126,15 @@ const fields = <Field>[
   Field('regen_current_a', 'Brake regen current', FieldKind.decimal, 0.0, 'advanced',
       unit: 'A', help: 'Phase current for regenerative braking (0 = off).'),
   Field('regen_max_a', 'Regen max into battery', FieldKind.decimal, 0.0, 'advanced', unit: 'A'),
+  Field('fw_current_a', 'Field weakening: max current', FieldKind.decimal, 0.0, 'advanced', unit: 'A',
+      help: 'More top speed once the battery voltage is used up (negative d current). 0 = off, start with 20 ... 40 % '
+          'of the phase current. d and q together stay within the phase current. Watch the motor temperature.'),
+  Field('fw_battery_a', 'Field weakening: battery current', FieldKind.decimal, 0.0, 'advanced', unit: 'A',
+      help: 'Battery current limit while weakening (0 = the normal battery current).'),
+  Field('fw_ramp_ms', 'Field weakening: ramp', FieldKind.integer, 500, 'advanced', unit: 'ms',
+      help: 'Time from 0 to the max field weakening current.'),
+  Field('fw_voltage_pct', 'Field weakening: voltage use', FieldKind.integer, 90, 'expert', unit: '%',
+      help: 'The weakening keeps the voltage the current control needs at this % of the maximum (VESC: duty start).'),
   Field('linear_regen', 'Proportional regen on AD2', FieldKind.boolean, false, 'advanced', help: 'Analog brake sensor on AD2.'),
   Field('voltage_ramp_v', 'Soft voltage ramp width', FieldKind.decimal, 1.0, 'advanced',
       unit: 'V', help: 'Current is reduced smoothly within this voltage above the cutoff and below full charge.'),
@@ -248,6 +257,12 @@ class BikeSettings {
     if (d('voltage_ramp_v') * 1000 >= (full - cutoff) / 2) {
       p.add("'Soft voltage ramp width' is too big for this battery voltage range.");
     }
+    if (d('fw_current_a') < 0 || d('fw_current_a') > d('phase_current_a')) {
+      p.add('Field weakening current must be 0 ... the phase current.');
+    }
+    if (d('fw_battery_a') < 0) p.add('Field weakening battery current must not be negative.');
+    if (i('fw_ramp_ms') < 1 || i('fw_ramp_ms') > 10000) p.add('Field weakening ramp must be 1 ... 10000 ms.');
+    if (i('fw_voltage_pct') < 50 || i('fw_voltage_pct') > 98) p.add('Field weakening voltage use must be 50 ... 98 %.');
     final idx = i('speed_temp_input');
     if (idx == 6 && b('torque_on_ad1')) p.add("Speed/temperature wire and torque sensor can't both use AD1.");
     if (idx == 5 && b('linear_regen')) p.add("Speed/temperature wire and proportional regen can't both use AD2.");

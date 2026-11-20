@@ -74,7 +74,11 @@ typedef struct {
 	int32_t obs_gamma;              // 148  (GAMMA, shift)
 	int32_t obs_angle_offset;       // 152  q31 (OBS_ANGLE_OFFSET)
 	int32_t current_ramp_ms;        // 156  ms from 0 to full phase current, 0 = no ramp (CURRENT_RAMP_MS)
-	uint32_t reserved[23];          // 160  0
+	int32_t fw_current_max;         // 160  field weakening: max negative Id, internal current units, 0 = off (FW_CURRENT_MAX)
+	int32_t fw_battery_current_max; // 164  field weakening: battery current limit while weakening, mA, 0 = battery_current_max
+	int32_t fw_ramp_ms;             // 168  field weakening: ms from 0 to fw_current_max, 0 = 500 ms
+	int32_t fw_voltage_pct;         // 172  field weakening: voltage use kept for the current control, %, 0 = 90 %
+	uint32_t reserved[19];          // 176  0
 	uint32_t crc;                   // 252  CRC-32 (IEEE, like zlib) of bytes 0..251
 } ebics_settings_t;
 

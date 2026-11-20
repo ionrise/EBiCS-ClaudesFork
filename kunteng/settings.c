@@ -65,6 +65,10 @@ static void load_defaults (void)
   kt_settings.ui8_ramp_x10 = 0;
   kt_settings.i8_foc_delay_x4us = 0;
   kt_settings.ui8_motor_characteristic = DEFAULT_VALUE_MOTOR_CHARACTARISTIC;
+  kt_settings.ui8_fw_angle_deg = 0;
+  kt_settings.ui8_fw_battery_a = 0;
+  kt_settings.ui8_fw_phase_a = 0;
+  kt_settings.ui8_fw_ramp_dps = 0;
 }
 
 // returns 1 if the EEPROM block is valid and in range
@@ -111,12 +115,20 @@ static uint8_t load_block (void)
   kt_settings.ui8_controller_type = read_eeprom (21);
   kt_settings.ui8_phase_current_factor_x10 = read_eeprom (22);
   ui8_p = read_eeprom (23);
-  if (ui8_p <= 3) { kt_settings.ui8_display = ui8_p; }
+  if (ui8_p <= 8) { kt_settings.ui8_display = ui8_p; } // DISPLAY_LAST (display.h)
   ui8_p = read_eeprom (24);
   if (ui8_p <= 50) { kt_settings.ui8_ramp_x10 = ui8_p; }
   kt_settings.i8_foc_delay_x4us = (int8_t) read_eeprom (25);
   ui8_p = read_eeprom (26);
   if (ui8_p) { kt_settings.ui8_motor_characteristic = ui8_p; }
+  ui8_p = read_eeprom (27);
+  if (ui8_p <= 60) { kt_settings.ui8_fw_angle_deg = ui8_p; }
+  ui8_p = read_eeprom (28);
+  if (ui8_p <= 30) { kt_settings.ui8_fw_battery_a = ui8_p; }
+  ui8_p = read_eeprom (29);
+  if (ui8_p <= 15) { kt_settings.ui8_fw_phase_a = ui8_p; }
+  ui8_p = read_eeprom (30);
+  kt_settings.ui8_fw_ramp_dps = (ui8_p > 120) ? 120 : ui8_p; // faster oscillates with the 160 ms current filter
   return 1;
 }
 
@@ -145,6 +157,15 @@ static void calc_derived (void)
   // phase current limit in ADC steps of 0.5 A (the 8 bit total current reading)
   ui16_temp = (((uint16_t) kt_settings.ui8_motor_current_a) * 2 * kt_settings.ui8_phase_current_factor_x10) / 10;
   kt_settings.ui8_phase_current_max = (ui16_temp > 250) ? 250 : (uint8_t) ui16_temp;
+
+  // field weakening
+  kt_settings.ui8_fw_angle_max = (uint8_t) ((((uint16_t) kt_settings.ui8_fw_angle_deg) * 256 + 180) / 360);
+  ui16_temp = kt_settings.ui8_fw_battery_a ? kt_settings.ui8_fw_battery_a : kt_settings.ui8_motor_current_a;
+  kt_settings.ui8_fw_battery_x2 = (uint8_t) (ui16_temp * 2);
+  ui16_temp = kt_settings.ui8_fw_phase_a ? kt_settings.ui8_fw_phase_a : 15;
+  kt_settings.ui8_fw_phase_peak = (uint8_t) ((ui16_temp * 1000 + 60) / 121); // 15 A -> 124 of 126 steps
+  ui16_temp = kt_settings.ui8_fw_ramp_dps ? kt_settings.ui8_fw_ramp_dps : 30;
+  kt_settings.ui16_fw_step_x256 = (uint16_t) ((ui16_temp * 182) / 100); // deg/s -> 1/256 x 256 per 10 ms
 }
 
 void settings_init (void)

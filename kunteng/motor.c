@@ -405,6 +405,11 @@ uint8_t ui8_coast_counter = 0;
 uint16_t ui16_emf_duty_per_erps_x256 = 0;
 uint16_t ui16_erps_x10_filtered = 0;        // speed in 1/10 erps, low pass (raw value has 2 % steps)
 uint8_t ui8_foc_adjust_effective = 137;     // FOC sample angle + delay compensation for the speed
+// field weakening: extra advance of the field in front of the Id = 0 angle (negative Id) once the duty cycle
+// is at its maximum. ui8_fw_angle is added to the sine table index in the PWM interrupt.
+uint16_t ui16_fw_angle_x256 = 0;
+volatile uint8_t ui8_fw_angle = 0;
+uint8_t throttle_is_set (void);
 
 // learned values (hall edge offsets, back-EMF constant) are kept in the data EEPROM, so they are there right
 // after power on. Block: 'L', offsets of the hall states 4, 6, 2, 3, 1, 5, back-EMF constant (2 bytes),
@@ -647,6 +652,8 @@ hall_done:
     ui8_motor_rotor_angle = ui8_motor_rotor_absolute_angle;
   }
   ui8_sinewave_table_index = ui8_motor_rotor_angle + ui8_angle_correction;
+  // weakening only in sine wave mode (the ISR may fall back to block commutation between two 10 ms ticks)
+  if (ui8_motor_commutation_type == SINEWAVE_INTERPOLATION_60_DEGREES) { ui8_sinewave_table_index += ui8_fw_angle; }
   if (ui8_ad_active) { ui8_sinewave_table_index = ui8_ad_index; } // autodetect: the field is turned by hand
 
   /****************************************************************************/
@@ -660,7 +667,8 @@ hall_done:
   // Only while motoring (battery current > 1 A): with regen current the phase current has the opposite sign
   // and the correction ran the wrong way (the current angle swung through +-90 deg in the simulation).
   ui8_temp = ui8_motor_rotor_angle - kt_settings.ui8_rotor_offset_angle; // angle relative to the halls
-  if ((ui16_motor_speed_erps > kt_settings.ui8_erps_interpolation) &&
+  // While field weakening the phase current leads on purpose: the correction is held at its last value.
+  if ((ui16_motor_speed_erps > kt_settings.ui8_erps_interpolation) && !ui8_fw_angle &&
       (UI8_ADC_MOTOR_TOTAL_CURRENT > (uint8_t) (ui8_motor_total_current_offset + 2)))
   {
     if (ui8_flag_foc_read_id_current && (ui8_temp >= ui8_foc_adjust_effective))
@@ -878,7 +886,7 @@ static uint16_t soft_speed_limit (uint16_t ui16_target_current)
 // the PWM on: there the current controller holds 0 A, switching off would leave the motor uncontrolled.
 static void do_coasting (uint16_t ui16_target_current)
 {
-  if (settings_flag (KT_FLAG_DIRECT_DRIVE) || ui16_target_current ||
+  if (settings_flag (KT_FLAG_DIRECT_DRIVE) || ui16_target_current || ui8_fw_angle ||
       motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_BRAKE))
   {
     ui8_coast_counter = 0;
@@ -903,6 +911,96 @@ static void do_coasting (uint16_t ui16_target_current)
     ui16_duty_cycle = 0;
     ui16_duty_cycle_target = 0;
   }
+}
+
+// Field weakening (idea from VESC: a negative Id above a duty cycle threshold, ramped, limited). The KT drive
+// controls the voltage, not the currents, so here the field is advanced in front of the Id = 0 angle that the
+// FOC correction found; that makes a negative Id and lowers the back-EMF the battery has to push against.
+// Differences to VESC:
+// - starts only when the voltage is really used up: duty cycle at its maximum AND the current controller still
+//   wants more current. VESC starts at a fixed duty cycle (fw_duty_start) whether more is wanted or not.
+// - while weakening, the duty cycle stays at its maximum and the battery current is controlled by the angle
+//   (proportional, max. the ramp per 10 ms). When less current is wanted the angle goes back first, then the
+//   normal duty cycle control takes over at the same point: no torque step at the hand over.
+// - limits on the measured currents: battery current (fast 8 bit reading) and phase B peak current (it grows
+//   with the weakening current, the battery current does not show it). Over a limit the angle goes back 2x fast.
+// - regen guard: above the base speed the back-EMF is higher than the battery voltage. Taking the angle away
+//   there (brake, throttle released) would brake the motor with an uncontrolled regen current. While the regen
+//   current is above the allowed regen current the angle is held or increased, so it goes back only as fast as
+//   the motor slows down.
+// - off at once on a fault, PWM off or block commutation (low speed); no coasting while weakening.
+static uint16_t field_weakening (uint16_t ui16_target_current, uint16_t ui16_target)
+{
+  uint16_t ui16_step = kt_settings.ui16_fw_step_x256;
+  uint16_t ui16_max = ((uint16_t) kt_settings.ui8_fw_angle_max) << 8;
+  uint16_t ui16_change = 0;
+  int16_t i16_error;
+  uint8_t ui8_up = 0;
+
+  if (!ui16_max || ui8_coasting || ui8_brake_pwm_off ||
+      (ui8_motor_commutation_type != SINEWAVE_INTERPOLATION_60_DEGREES) ||
+      (ui8_motor_controller_state & (uint8_t) ~(MOTOR_CONTROLLER_STATE_OK | MOTOR_CONTROLLER_STATE_BRAKE)))
+  {
+    ui16_fw_angle_x256 = 0;
+    ui8_fw_angle = 0;
+    return ui16_target;
+  }
+
+  i16_error = (int16_t) ui16_target_current - i16_motor_current_filtered_10b; // 0.125 A
+  if (i16_error > 32) { i16_error = 32; }
+  if (i16_error < -32) { i16_error = -32; }
+
+  if (ui16_fw_angle_x256 && (ui8_phase_b_peak <= kt_settings.ui8_fw_phase_peak) &&
+      (ui8_adc_motor_total_current + 1 < ui8_adc_target_motor_regen_current_max))
+  {
+    // weakening and more regen current than allowed: the back-EMF is above the battery voltage, the angle
+    // must not go back faster than the motor slows down. Only while weakening (never starts it) and not
+    // over the phase current limit.
+    ui16_change = ui16_step;
+    ui8_up = 1;
+  }
+  else if (motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_BRAKE))
+  {
+    ui16_change = ui16_step << 3; // brake: drive torque away quickly, the regen guard above holds the rest
+  }
+  else if ((ui16_duty_cycle_speed_controller < PWM_DUTY_MAX) ||
+           (settings_flag (KT_FLAG_FW_THROTTLE_ONLY) && ebike_app_is_throttle_released ()) ||
+           (ui8_adc_motor_total_current > (uint8_t) (ui8_motor_total_current_offset + kt_settings.ui8_fw_battery_x2)) ||
+           (ui8_phase_b_peak > kt_settings.ui8_fw_phase_peak))
+  {
+    ui16_change = ui16_step << 1; // not allowed now or over a limit: back, 2x fast
+  }
+  else if ((i16_error > 4) && (ui16_duty_cycle >= (PWM_DUTY_MAX - 2)))
+  {
+    ui16_change = (uint16_t) (((uint32_t) ui16_step * (uint16_t) i16_error) >> 5); // more current wanted
+    ui8_up = 1;
+  }
+  else if (i16_error < -4)
+  {
+    ui16_change = (uint16_t) (((uint32_t) ui16_step * (uint16_t) (-i16_error)) >> 5); // less current wanted
+  }
+  if (!ui16_change && (ui8_up || i16_error < -4)) { ui16_change = 1; }
+
+  if (ui8_up)
+  {
+    ui16_fw_angle_x256 = ((ui16_max - ui16_fw_angle_x256) > ui16_change) ? (ui16_fw_angle_x256 + ui16_change) : ui16_max;
+  }
+  else
+  {
+    ui16_fw_angle_x256 = (ui16_fw_angle_x256 > ui16_change) ? (ui16_fw_angle_x256 - ui16_change) : 0;
+  }
+  ui8_fw_angle = (uint8_t) (ui16_fw_angle_x256 >> 8);
+
+  if (ui16_fw_angle_x256)
+  {
+    // weakening: full voltage, the angle controls the current. The current PI starts again from here
+    // (last error = this error, so its P part does not kick at the hand over).
+    i16_current_pi_fraction = 0;
+    i16_error = (int16_t) ui16_target_current - ((i16_motor_current_filtered_10b < 0) ? 0 : i16_motor_current_filtered_10b);
+    i16_current_error_last = i16_error;
+    return PWM_DUTY_MAX;
+  }
+  return ui16_target;
 }
 
 // called every 10ms: current measurement and current controller
@@ -947,7 +1045,10 @@ void motor_fast_controller (void)
     // oscillated between motoring and braking in the simulation).
     ui16_target = (uint16_t) ((((uint32_t) ui16_motor_speed_erps * ui16_emf_duty_per_erps_x256) >> 8) / 2);
     if (ui16_target > PWM_DUTY_MAX) { ui16_target = PWM_DUTY_MAX; }
-    if (!kt_settings.ui8_regen_current_a || !ui16_emf_duty_per_erps_x256 || (ui16_motor_speed_erps <= 30))
+    // Not while weakening: above the base speed the PWM off would let the diodes brake uncontrolled. The
+    // angle goes back first (regen guard), then the PWM goes off.
+    if ((!kt_settings.ui8_regen_current_a || !ui16_emf_duty_per_erps_x256 || (ui16_motor_speed_erps <= 30)) &&
+        !ui16_fw_angle_x256)
     {
       ui16_target = 0;
       ui16_duty_cycle = 0;
@@ -965,6 +1066,7 @@ void motor_fast_controller (void)
     if (ui16_duty_cycle > PWM_DUTY_MAX) { ui16_duty_cycle = PWM_DUTY_MAX; }
     ui16_target = ui16_duty_cycle;
   }
+  ui16_target = field_weakening (ui16_target_current, ui16_target);
   motor_set_pwm_duty_cycle_target (ui16_target);
 }
 

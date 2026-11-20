@@ -107,8 +107,18 @@ FOC_HIGH, FOC_LOW = 127, 125
 class Firmware:
     def __init__(self, original=False, cells=10, current_a=15, regen_a=0, erps_interp=15, rotor_offset=202,
                  foc_adjust=137, phase_factor_x10=25, direct_drive=False, hall_learning=True, phase_limit=True,
-                 offset8=79, offset10=317, foc_delay_us=0):
+                 offset8=79, offset10=317, foc_delay_us=0, fw_deg=0, fw_battery_a=0, fw_phase_a=0, fw_ramp_dps=0,
+                 fw_throttle_only=False, fw_regen_guard=True):
         self.orig = original
+        # field weakening (settings.c calc_derived)
+        self.fw_max = ((fw_deg * 256 + 180) // 360) << 8
+        self.fw_batt_x2 = (fw_battery_a or current_a) * 2
+        self.fw_phase_peak = ((fw_phase_a or 15) * 1000 + 60) // 121
+        self.fw_step = ((fw_ramp_dps or 30) * 182) // 100
+        self.fw_throttle_only = fw_throttle_only
+        self.fw_regen_guard = fw_regen_guard
+        self.fw_x256 = 0
+        self.fw_angle = 0
         self.foc_delay_x4 = max(-128, min(127, int(foc_delay_us / 4)))
         self.foc_adjust_eff = foc_adjust
         self.cells, self.current_a, self.regen_a = cells, current_a, regen_a
@@ -300,7 +310,7 @@ class Firmware:
                 self.rotor_angle = self.abs_angle
         else:
             self.rotor_angle = self.abs_angle
-        index = (self.rotor_angle + self.correction) & 0xFF
+        index = (self.rotor_angle + self.correction + (self.fw_angle if self.commutation == 2 else 0)) & 0xFF
         if self.ad_active:
             index = self.ad_index
 
@@ -317,7 +327,7 @@ class Firmware:
                         self.correction = (self.correction + 1) & 0xFF
                     elif adc_phase_b8 < FOC_LOW:
                         self.correction = (self.correction - 1) & 0xFF
-        elif self.erps > self.erps_interp and adc_total8 > self.offset8 + 2:
+        elif self.erps > self.erps_interp and adc_total8 > self.offset8 + 2 and not self.fw_angle:
             if self.foc_flag and rel >= self.foc_adjust_eff:
                 self.foc_flag = 0
                 self.last_adc_id = adc_phase_b8
@@ -423,7 +433,7 @@ class Firmware:
         target = self.soft_limit(self.target_current)
         # coasting (geared motor, no current requested)
         braking = bool(self.ctrl_state & 2)
-        if self.direct_drive or target or braking:
+        if self.direct_drive or target or braking or self.fw_angle:
             self.coast_counter = 0
             if self.coasting and not braking:
                 d = (self.erps * self.coast_k) >> 8 if self.erps > 15 else 0
@@ -451,7 +461,7 @@ class Firmware:
         if braking:
             floor = ((self.erps * self.coast_k) >> 8) // 2
             self.duty_target = min(self.duty_max, floor)
-            if not self.regen_a or not self.coast_k or self.erps <= 30:
+            if (not self.regen_a or not self.coast_k or self.erps <= 30) and not self.fw_x256:
                 self.duty_target = self.duty = 0
                 self.brake_off = True
                 self.moe = False
@@ -460,6 +470,38 @@ class Firmware:
             self.brake_off = False
             self.duty = min(self.duty_max, (self.erps * self.coast_k) >> 8) if self.erps > 15 else 0
             self.duty_target = self.duty
+        self.duty_target = self.field_weakening(target, current, braking, self.duty_target)
+
+    def field_weakening(self, target, current, braking, duty_target):
+        """Port of field_weakening() in motor.c."""
+        if not self.fw_max or self.coasting or self.brake_off or self.commutation != 2 or (self.ctrl_state & ~3):
+            self.fw_x256 = self.fw_angle = 0
+            return duty_target
+        err = max(-32, min(32, target - current))
+        step, change, up = self.fw_step, 0, False
+        if self.fw_regen_guard and self.fw_x256 and self.pb_peak <= self.fw_phase_peak and                 self.adc8 + 1 < self.regen_target:
+            change, up = step, True
+        elif braking:
+            change = step << 3
+        elif self.speed_out < self.duty_max or (self.fw_throttle_only and self.throttle_released) or \
+                self.adc8 > self.offset8 + self.fw_batt_x2 or self.pb_peak > self.fw_phase_peak:
+            change = step << 1
+        elif err > 4 and self.duty >= self.duty_max - 2:
+            change, up = (step * err) >> 5, True
+        elif err < -4:
+            change = (step * -err) >> 5
+        if not change and (up or err < -4):
+            change = 1
+        if up:
+            self.fw_x256 = min(self.fw_max, self.fw_x256 + change)
+        else:
+            self.fw_x256 = max(0, self.fw_x256 - change)
+        self.fw_angle = self.fw_x256 >> 8
+        if self.fw_x256:
+            self.frac = 0
+            self.err_last = max(-400, min(400, target - max(0, current)))
+            return self.duty_max
+        return duty_target
 
     def learn(self):
         if not self.snap_ready:
@@ -680,7 +722,8 @@ def run(fw, motor, hw, seconds, target_fn, erps_max=340, log_every=0.01, brake_f
             rows.append(dict(t=t, iq=motor.iq, id=motor.id, iph=iph, peak=peak_phase, idc=i_dc, idc_f=hw.i_dc_f,
                              kmh=motor.v * 3.6, erps=fw.erps, w_erps=motor.w / 2 / math.pi, duty=fw.duty,
                              duty_max=fw.duty_max, corr=fw.correction, comm=fw.commutation, moe=moe,
-                             state=fw.motor_state, ctrl=fw.ctrl_state, offs=list(fw.hall_off), vbat=hw.vbat))
+                             state=fw.motor_state, ctrl=fw.ctrl_state, offs=list(fw.hall_off), vbat=hw.vbat,
+                             fw=fw.fw_angle))
             peak_phase = 0.0
     return rows
 
@@ -807,6 +850,77 @@ def main():
 
     def hw_for(m, **kw):
         return Hardware(m, phase_b_sign=sign, **kw)
+
+    def fw_tests():
+        # 13. field weakening: top speed, currents, hand over, throttle release above the base speed
+        print("\n=== 13. field weakening, 36 V (39 V full), 15 A, flat, no speed limit (motor over speed 520 erps)")
+        deg_per_erps = 25.0 / 340
+        for dd in (False, True):
+            for fw_deg, phase_a in ((0, 0), (20, 0), (40, 0), (40, 10)):
+                FINDINGS.clear()
+                m = Motor(v=20 / 3.6, direct_drive=dd)
+                hw = hw_for(m)
+                fw = Firmware(direct_drive=dd, fw_deg=fw_deg, fw_phase_a=phase_a, fw_ramp_dps=60)
+                rows = run(fw, m, hw, 14.0, lambda t: (15, True), erps_max=520)
+                last = [r for r in rows if r["t"] > 12]
+                kmh = sum(r["kmh"] for r in last) / len(last)
+                idc = sum(r["idc_f"] for r in last) / len(last)
+                idd = sum(r["id"] for r in last) / len(last)
+                iph = max(r["iph"] for r in last)
+                ang = sum(r["fw"] for r in last) / len(last) * 360 / 256
+                print(f"  {'direct' if dd else 'geared'} weakening max {fw_deg:2d} deg{' phase ' + str(phase_a) + ' A' if phase_a else '':12s}: "
+                      f"top speed {kmh:5.1f} km/h, battery {idc:5.1f} A, Id {idd:6.1f} A, phase peak {iph:5.1f} A, angle {ang:4.1f} deg "
+                      f"findings: {dict(FINDINGS) or '-'}")
+
+        print("\n=== 13b. direct drive, 3 % downhill, top speed with weakening, throttle released at 10 s (regen guard on / off)")
+        for guard in (True, False):
+            FINDINGS.clear()
+            m = Motor(v=25 / 3.6, direct_drive=True, slope=-0.03)
+            hw = hw_for(m)
+            fw = Firmware(direct_drive=True, fw_deg=40, fw_ramp_dps=60, fw_regen_guard=guard)
+            rows = run(fw, m, hw, 13.0, lambda t: (15, True) if t < 10 else (0, False), erps_max=520)
+            after = [r for r in rows if 10 <= r["t"] < 13]
+            before = [r for r in rows if 9 <= r["t"] < 10]
+            print(f"  guard {'on ' if guard else 'off'}: at 10 s {before[-1]['kmh']:5.1f} km/h angle {before[-1]['fw'] * 360 / 256:4.1f} deg; "
+                  f"after release: min battery current {min(r['idc_f'] for r in after):6.1f} A, max phase {max(r['iph'] for r in after):5.1f} A, "
+                  f"angle at 13 s {after[-1]['fw'] * 360 / 256:4.1f} deg, {after[-1]['kmh']:5.1f} km/h")
+
+        print("\n=== 13d. direct drive, 3 % downhill, weakening, brake pulled at 8 s (regen 0 A / 6 A)")
+        for regen in (0, 6):
+            FINDINGS.clear()
+            m = Motor(v=25 / 3.6, direct_drive=True, slope=-0.03)
+            hw = hw_for(m)
+            fw = Firmware(direct_drive=True, regen_a=regen, fw_deg=40, fw_ramp_dps=60)
+
+            def ev(t, fw_, m_, hw_):
+                if abs(t - 8.0) < TS / 2:
+                    fw_.press_brake(True)
+            rows = run(fw, m, hw, 10.0, lambda t: (15, t < 8), erps_max=520, event_fn=ev)
+            b = [r for r in rows if r["t"] < 8][-1]
+            after = [r for r in rows if r["t"] >= 8]
+            drive = [r for r in after if r["idc_f"] > 0.5]
+            print(f"  regen {regen} A: at 8 s {b['kmh']:5.1f} km/h angle {b['fw'] * 360 / 256:4.1f} deg; motoring after the brake for "
+                  f"{(drive[-1]['t'] - 8) * 1000 if drive else 0:3.0f} ms, min battery current {min(r['idc_f'] for r in after):6.1f} A "
+                  f"(limit {-regen}), max phase {max(r['iph'] for r in after):5.1f} A, angle 0 after "
+                  f"{(next((r['t'] for r in after if r['fw'] == 0), 99) - 8) * 1000:4.0f} ms  findings: {dict(FINDINGS) or '-'}")
+
+        print("\n=== 13c. hand over: geared, 40 deg, full throttle 6 s, then 5 A (less current wanted) for 3 s")
+        FINDINGS.clear()
+        m = Motor(v=20 / 3.6)
+        hw = hw_for(m)
+        fw = Firmware(fw_deg=40, fw_ramp_dps=60)
+        rows = run(fw, m, hw, 9.0, lambda t: (15, True) if t < 6 else (5, True), erps_max=520)
+        for t0 in (5.9, 6.1, 6.3, 6.6, 7.0, 8.9):
+            r = min(rows, key=lambda r: abs(r["t"] - t0))
+            print(f"  t {r['t']:4.1f} s: angle {r['fw'] * 360 / 256:4.1f} deg, duty {r['duty']:3d}, battery {r['idc_f']:5.1f} A, "
+                  f"{r['kmh']:5.1f} km/h")
+        steps = [abs(b["idc_f"] - a["idc_f"]) for a, b in zip(rows, rows[1:]) if 6 <= a["t"] < 9]
+        print(f"  largest battery current change per 10 ms after 6 s: {max(steps):.2f} A  findings: {dict(FINDINGS) or '-'}")
+
+
+    if "--fw" in sys.argv:      # only the field weakening scenarios
+        fw_tests()
+        return 0
 
     # 1. start from standstill, full throttle, flat road
     print("\n=== 1. start from standstill, full throttle (15 A), 100 kg, flat")
@@ -1032,6 +1146,8 @@ def main():
         got = [offs[st] for st in HALL_ORDER]
         print(f"  friction {friction:4.1f} N, hysteresis {hyst_deg:3.1f} deg: rotor offset {offset} (forward only {offset_fwd}), "
               f"edge offsets {got}, spread {spread}/256 ({spread * 360 / 256:.0f} deg)  findings: {dict(FINDINGS) or '-'}")
+
+    fw_tests()
 
     # 10. high current S12S: int8 wrap of the original
     print("\n=== 10. S12S 25 A start: the original int8 current wraps above 15.9 A")

@@ -105,6 +105,18 @@
 #ifndef CURRENT_RAMP_MS
 #define CURRENT_RAMP_MS 300                    // ms from 0 to full phase current, 0 = no ramp
 #endif
+#ifndef FW_CURRENT_MAX
+#define FW_CURRENT_MAX 0                       // field weakening: max negative Id (internal current units), 0 = off
+#endif
+#ifndef FW_BATTERY_CURRENT_MAX
+#define FW_BATTERY_CURRENT_MAX 0               // field weakening: battery current limit while weakening (mA), 0 = normal limit
+#endif
+#ifndef FW_RAMP_MS
+#define FW_RAMP_MS 500                         // field weakening: ms from 0 to FW_CURRENT_MAX
+#endif
+#ifndef FW_VOLTAGE_PCT
+#define FW_VOLTAGE_PCT 90                      // field weakening keeps the voltage use at this % of the maximum
+#endif
 #ifndef SPEED_TEMP_ADC
 #define SPEED_TEMP_ADC 6                       // adcData index of the speed/temperature input: 6 = AD1 (PB1), 5 = AD2 (PB0)
 #endif

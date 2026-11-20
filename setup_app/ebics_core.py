@@ -219,6 +219,17 @@ FIELDS = [
     ("speed_throttle", "Throttle sets target speed", "bool", False, "advanced", "", ""),
     ("regen_current_a", "Brake regen current", "float", 0.0, "advanced", "A", "Phase current for regenerative braking (0 = off)."),
     ("regen_max_a", "Regen max into battery", "float", 0.0, "advanced", "A", ""),
+    ("fw_current_a", "Field weakening: max current", "float", 0.0, "advanced", "A",
+     "More top speed: when the battery voltage is used up, a negative d current lowers the motor's back-EMF. "
+     "Max d current, 0 = off. Start with 20 ... 40 % of the phase current. The motor current (d and q together) "
+     "stays within the phase current, so less torque is left at high speed. Watch the motor temperature."),
+    ("fw_battery_a", "Field weakening: battery current", "float", 0.0, "advanced", "A",
+     "Battery current limit while field weakening (0 = the normal battery current). Limits the power at high speed."),
+    ("fw_ramp_ms", "Field weakening: ramp", "int", 500, "advanced", "ms",
+     "Time from 0 to the max field weakening current. Faster reacts quicker, slower is smoother."),
+    ("fw_voltage_pct", "Field weakening: voltage use", "int", 90, "expert", "%",
+     "The weakening keeps the voltage the current control needs at this % of the maximum (VESC: duty start). "
+     "Lower = more headroom and more weakening, higher = weakening starts later."),
     ("linear_regen", "Proportional regen on AD2", "bool", False, "advanced", "", "Analog brake sensor on AD2."),
     ("voltage_ramp_v", "Soft voltage ramp width", "float", 1.0, "advanced", "V",
      "Current is reduced smoothly within this voltage above the cutoff (motor) and below the full charge voltage (regen)."),
@@ -356,6 +367,14 @@ def check_settings(s):
         p.append("Speed/temperature wire and proportional regen can't both use AD2.")
     if idx and not (s.get("speed_on_wire") or s.get("temp_on_wire")):
         p.append("Speed/temperature wire is selected but neither speed nor temperature is ticked.")
+    if not 0 <= float(s.get("fw_current_a", 0) or 0) <= float(s.get("phase_current_a", 0) or 0):
+        p.append("Field weakening current must be 0 ... the phase current.")
+    if float(s.get("fw_battery_a", 0) or 0) < 0:
+        p.append("Field weakening battery current must not be negative.")
+    if not 1 <= int(s.get("fw_ramp_ms", 500)) <= 10000:
+        p.append("Field weakening ramp must be 1 ... 10000 ms.")
+    if not 50 <= int(s.get("fw_voltage_pct", 90)) <= 98:
+        p.append("Field weakening voltage use must be 50 ... 98 %.")
     return p
 
 
@@ -404,6 +423,8 @@ def generate_config_h(s):
     d("REGEN_CURRENT", units(s["regen_current_a"])); d("REGEN_CURRENT_MAX", ma(s["regen_max_a"]))
     d("VOLTAGE_MIN", int(cutoff / cal_v)); d("VOLTAGE_MAX", int(vmax / cal_v)); d("SPEC_ANGLE", s["spec_angle"])
     d("CURRENT_RAMP_MS", max(0, min(10000, int(s.get("current_ramp_ms", 300)))))
+    d("FW_CURRENT_MAX", units(s.get("fw_current_a", 0) or 0)); d("FW_BATTERY_CURRENT_MAX", ma(s.get("fw_battery_a", 0) or 0))
+    d("FW_RAMP_MS", max(1, min(10000, int(s.get("fw_ramp_ms", 500))))); d("FW_VOLTAGE_PCT", max(50, min(98, int(s.get("fw_voltage_pct", 90) or 90))))
     d("BATTERYVOLTAGE_MIN", cutoff); d("BATTERYVOLTAGE_MAX", vmax)
     d("VOLTAGE_RAMP_MV", max(100, int(float(s.get("voltage_ramp_v", 1.0)) * 1000)))
     d("MOTOR_TEMPERATURE_THRESHOLD", int(s.get("motor_temp_derate", 100)))
@@ -460,7 +481,7 @@ SETTINGS_FIELDS = ["ph_current_max", "battery_current_max", "regen_current", "re
                    "motor_temp_threshold", "motor_temp_max", "frac_high", "frac_low", "reverse",
                    "speed_temp_adc", "speed_temp_threshold", "ntc_pullup_ohm",
                    "obs_inductance", "obs_resistance", "obs_flux_linkage", "obs_gamma", "obs_angle_offset",
-                   "current_ramp_ms"]
+                   "current_ramp_ms", "fw_current_max", "fw_battery_current_max", "fw_ramp_ms", "fw_voltage_pct"]
 
 
 def _c_int(v):
@@ -500,7 +521,11 @@ def settings_block_values(s):
          "obs_flux_linkage": _c_int(s["flux_linkage"]), "obs_gamma": _c_int(s["gamma"]),
          "obs_angle_offset": int.from_bytes((int(round(float(s.get("obs_angle_deg", 20.0)) / 180.0 * 2 ** 31)) & 0xFFFFFFFF)
                                             .to_bytes(4, "little"), "little", signed=True),
-         "current_ramp_ms": max(0, min(10000, int(s.get("current_ramp_ms", 300))))}
+         "current_ramp_ms": max(0, min(10000, int(s.get("current_ramp_ms", 300)))),
+         "fw_current_max": max(0, min(4000, units(s.get("fw_current_a", 0) or 0))),
+         "fw_battery_current_max": max(0, ma(s.get("fw_battery_a", 0) or 0)),
+         "fw_ramp_ms": max(1, min(10000, int(s.get("fw_ramp_ms", 500)))),
+         "fw_voltage_pct": max(50, min(98, int(s.get("fw_voltage_pct", 90) or 90)))}
     for n, mv in enumerate(bars, 1):
         v[f"battery_level_{n}"] = mv * 10
     return flags, v
@@ -700,6 +725,7 @@ LIVE_VARS = {
     "ui16_motor_temp_adc": ("u16", 0),
     "ui8_motor_temp_sensor_ok": ("u8", 0),
     "ui8_sensorless_running": ("u8", 0),
+    "i32_fw_id": ("i32", 0),
 }
 MS_FIELDS = {"Voltage": ("i32", 0), "Speed": ("u32", 4), "i_q": ("i32", 12), "i_q_setpoint": ("i32", 16),
              "u_abs": ("i32", 44), "Battery_Current": ("i32", 48), "assist_level": ("u8", 54),

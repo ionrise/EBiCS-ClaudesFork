@@ -32,6 +32,11 @@ const ktChoices = <String, List<(String, int)>>{
     ('KingMeter 901U / KM5S', 1),
     ('Bafang LCD (1200 baud)', 2),
     ('Bafang 850C / 860C (9600 baud)', 3),
+    ('KingMeter J-LCD / 618U', 4),
+    ('UART No.2 (S866, EN06 ...)', 5),
+    ('Tongsheng VLCD5 / VLCD6 / XH18', 6),
+    ('VESC UART (115200 baud)', 7),
+    ('EBiCS app / BLE module', 8),
   ],
 };
 
@@ -51,8 +56,9 @@ const ktFields = <KtField>[
     0,
     'basic',
     help:
-        'Display protocol. Multi protocol displays: set the same in the display menu. KingMeter and Bafang '
-        'assist levels are mapped to the 5 levels.',
+        'Display protocol. Multi protocol displays: set the same in the display menu. Other displays: assist '
+        'levels are mapped to the 5 levels, no walk assist or lights on KT. VESC: live values and current '
+        'commands (assist level 3). EBiCS: the EBiCS app with the BLE module.',
   ),
   KtField(
     'cells',
@@ -155,6 +161,50 @@ const ktFields = <KtField>[
     help: 'Stops the motor above 4.2 V per cell (error 05), restarts when the voltage drops.',
   ),
   KtField(
+    'fw_angle_deg',
+    'Field weakening: max angle',
+    KtKind.integer,
+    0,
+    'advanced',
+    unit: 'deg',
+    help: 'More top speed once the full voltage is used. 0 = off, 20 ... 40 typical. More angle = more phase current.',
+  ),
+  KtField(
+    'fw_battery_a',
+    'Field weakening: battery current',
+    KtKind.integer,
+    0,
+    'advanced',
+    unit: 'A',
+    help: 'Battery current limit while weakening (0 = max motor current).',
+  ),
+  KtField(
+    'fw_phase_a',
+    'Field weakening: phase current',
+    KtKind.integer,
+    0,
+    'advanced',
+    unit: 'A',
+    help: 'Peak phase current limit while weakening, phase B sensor (0 = 15 A = sensor range).',
+  ),
+  KtField(
+    'fw_ramp_dps',
+    'Field weakening: ramp speed',
+    KtKind.integer,
+    30,
+    'advanced',
+    unit: 'deg/s',
+    help: 'How fast the angle may change. Goes back 2x faster when not allowed (brake, limit).',
+  ),
+  KtField(
+    'fw_throttle_only',
+    'Field weakening only with the throttle',
+    KtKind.boolean,
+    0,
+    'advanced',
+    help: 'Use field weakening only while the throttle is pressed, not with PAS alone.',
+  ),
+  KtField(
     'rotor_offset_angle',
     'Hall sensor angle offset',
     KtKind.integer,
@@ -239,6 +289,10 @@ class KtSettings {
     if (d('ramp_s') < 0.1 || d('ramp_s') > 5) p.add('Power ramp must be 0.1 ... 5 s.');
     if (i('motor_characteristic') < 1 || i('motor_characteristic') > 255) p.add('Motor constant must be 1 ... 255.');
     if (i('foc_delay_us') < -500 || i('foc_delay_us') > 500) p.add('FOC delay compensation must be -500 ... 500 us.');
+    if (i('fw_angle_deg') < 0 || i('fw_angle_deg') > 60) p.add('Field weakening angle must be 0 ... 60 deg.');
+    if (i('fw_battery_a') < 0 || i('fw_battery_a') > 30) p.add('Field weakening battery current must be 0 ... 30 A.');
+    if (i('fw_phase_a') < 0 || i('fw_phase_a') > 15) p.add('Field weakening phase current must be 0 ... 15 A.');
+    if (i('fw_ramp_dps') < 5 || i('fw_ramp_dps') > 120) p.add('Field weakening ramp must be 5 ... 120 deg/s.');
     return p;
   }
 
@@ -255,7 +309,8 @@ class KtSettings {
         (i('pas_direction') == 1 ? 2 : 0) |
         (b2i('over_voltage_protection') * 4) |
         (b('phase_current_limit') ? 0 : 8) |
-        (b('hall_learning') ? 0 : 16);
+        (b('hall_learning') ? 0 : 16) |
+        (b2i('fw_throttle_only') * 32);
     out[9] = i('pas_magnets');
     out[10] = i('pas_max_cadence');
     for (var n = 0; n < 5; n++) {
@@ -272,6 +327,10 @@ class KtSettings {
     out[24] = SettingsBlock.pyRound(d('ramp_s') * 10);
     out[25] = (i('foc_delay_us') ~/ 4) & 0xFF; // int8, truncated toward zero like the desktop app
     out[26] = i('motor_characteristic');
+    out[27] = i('fw_angle_deg');
+    out[28] = i('fw_battery_a');
+    out[29] = i('fw_phase_a');
+    out[30] = i('fw_ramp_dps');
     var sum = 0;
     for (var n = 0; n < 31; n++) {
       sum += out[n];

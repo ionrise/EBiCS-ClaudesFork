@@ -5,10 +5,16 @@ similar boards. Based on [casainho's BMSBattery_S_controllers_firmware](https://
 (GPL v3), with bug fixes, runtime settings and motor control improvements. It is installed and configured
 with the **EBiCS Setup** apps (PC and Android) over the SWIM pin of an ST-Link V2. No ST Visual Programmer needed.
 
-Displays: Kunteng KT-LCD3 / LCD5 / LCD8, KingMeter 901U / KM5S, Bafang LCD and 850C / 860C (setting
-"Display"). Both apps show live data of the running controller over the ST-Link (no restart) and run a hall
+Displays (setting "Display"): Kunteng KT-LCD3 / LCD5 / LCD8, KingMeter 901U / KM5S and J-LCD / 618U, Bafang
+LCD and 850C / 860C, UART No.2 (S866, EN06 ...), Tongsheng VLCD5 / VLCD6 / XH18, VESC UART (115200 baud, live
+values and current commands for VESC displays / apps) and the EBiCS app with the BLE module: every display
+protocol of the Lishui EBiCS firmware. Both apps show live data of the running controller over the ST-Link (no restart) and run a hall
 autodetect (Tools / step 6, wheel lifted): the motor turns slowly forward and back, the real hall positions
 are measured and saved in the controller.
+
+Field weakening (settings "Field weakening ..."): more top speed once the full battery voltage is used, with its
+own battery and phase current limits and ramp speed (about +13 % top speed in the motor simulator). Watch the
+motor temperature: the weakening current heats the motor without adding power.
 
 > Not tested on a real KT controller yet. It builds, and the motor code runs in the STM8 simulator (see
 > below), but test with the wheel lifted first and start with a low current.

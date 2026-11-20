@@ -24,7 +24,7 @@ class SettingsBlock {
     'motor_temp_threshold', 'motor_temp_max', 'frac_high', 'frac_low', 'reverse',
     'speed_temp_adc', 'speed_temp_threshold', 'ntc_pullup_ohm',
     'obs_inductance', 'obs_resistance', 'obs_flux_linkage', 'obs_gamma', 'obs_angle_offset',
-    'current_ramp_ms',
+    'current_ramp_ms', 'fw_current_max', 'fw_battery_current_max', 'fw_ramp_ms', 'fw_voltage_pct',
   ];
 
   /// Python round(): halves to even.
@@ -100,6 +100,10 @@ class SettingsBlock {
       'obs_gamma': cInt(s.s('gamma'), 0),
       'obs_angle_offset': angle,
       'current_ramp_ms': (s.values.containsKey('current_ramp_ms') ? s.i('current_ramp_ms') : 300).clamp(0, 10000),
+      'fw_current_max': (s.values.containsKey('fw_current_a') ? units('fw_current_a') : 0).clamp(0, 4000),
+      'fw_battery_current_max': s.values.containsKey('fw_battery_a') && ma('fw_battery_a') > 0 ? ma('fw_battery_a') : 0,
+      'fw_ramp_ms': (s.values.containsKey('fw_ramp_ms') ? s.i('fw_ramp_ms') : 500).clamp(1, 10000),
+      'fw_voltage_pct': (s.values.containsKey('fw_voltage_pct') ? s.i('fw_voltage_pct') : 90).clamp(50, 98),
     };
     for (var n = 0; n < 5; n++) {
       v['battery_level_${n + 1}'] = bars[n] * 10;

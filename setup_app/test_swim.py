@@ -203,6 +203,21 @@ class SwimTests(unittest.TestCase):
         self.assertEqual(t.mem[swim.SETTINGS_BLOCK_ADDR + 5], 11)
         self.assertEqual(t.block_writes, 1)
 
+    def test_kt_display_choices_match_firmware(self):
+        import re
+        import kunteng_core as kt
+        here = os.path.dirname(os.path.abspath(__file__))
+        h = open(os.path.join(here, "..", "kunteng", "display.h")).read()
+        last = int(re.search(r"#define DISPLAY_LAST\s+(\d+)", h).group(1))
+        codes = [c for _label, c in kt.CHOICES["display"]]
+        self.assertEqual(codes, list(range(last + 1)))
+        c = open(os.path.join(here, "..", "kunteng", "settings.c")).read()
+        self.assertIn("if (ui8_p <= %d) { kt_settings.ui8_display = ui8_p; }" % last, c)
+        for code in codes:
+            st = kt.default_settings()
+            st["display"] = code
+            self.assertEqual(kt.settings_block(st)[23], code)
+
     def test_settings_block_layout(self):
         import kunteng_core as kt
         b = kt.settings_block(kt.default_settings())

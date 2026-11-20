@@ -101,6 +101,10 @@ static const ebics_settings_t settings_default = {
 	.obs_gamma = GAMMA,
 	.obs_angle_offset = (int32_t)(OBS_ANGLE_OFFSET),
 	.current_ramp_ms = CURRENT_RAMP_MS,
+	.fw_current_max = FW_CURRENT_MAX,
+	.fw_battery_current_max = FW_BATTERY_CURRENT_MAX,
+	.fw_ramp_ms = FW_RAMP_MS,
+	.fw_voltage_pct = FW_VOLTAGE_PCT,
 };
 
 uint32_t settings_crc32(const uint8_t *data, uint32_t len)
@@ -135,6 +139,10 @@ static uint8_t settings_plausible(const ebics_settings_t *s)
 	if ((s->flags & SF_TEMP_FROM_WIRE) && s->ntc_pullup_ohm < 1) return 0;
 	if (s->obs_gamma < 0 || s->obs_gamma > 30) return 0;
 	if (s->current_ramp_ms < 0 || s->current_ramp_ms > 10000) return 0;
+	// field weakening: 0 everywhere in blocks written before it existed (= off, defaults)
+	if (s->fw_current_max < 0 || s->fw_current_max > 4000 || s->fw_battery_current_max < 0) return 0;
+	if (s->fw_ramp_ms < 0 || s->fw_ramp_ms > 10000) return 0;
+	if (s->fw_voltage_pct != 0 && (s->fw_voltage_pct < 50 || s->fw_voltage_pct > 98)) return 0;
 	return 1;
 }
 

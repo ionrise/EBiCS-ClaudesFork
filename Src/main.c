@@ -225,6 +225,13 @@ q31_t q31_hall_bwd[6];
 q31_t q31_hall_avg[6];
 volatile uint8_t ui8_setup_halls_found_bwd = 0;
 volatile uint8_t ui8_setup_hall_spread = 0;
+// field weakening (runPIcontrol): negative Id setpoint (internal current units, live data), its ramp state,
+// the ramp step per FOC cycle, the voltage the current controllers ask for (before the limit, low pass x16)
+volatile int32_t i32_fw_id = 0;
+static int32_t i32_fw_id16 = 0;
+static int32_t i32_fw_step16 = 0;
+static int32_t i32_fw_u_start = 0;
+static int32_t i32_u_demand16 = 0;
 static int8_t i8_direction_fwd = 1;
 q31_t Hall_32 = 0;
 q31_t Hall_26 = 0;
@@ -432,6 +439,11 @@ int main(void)
 	// a 64 bit division here pulled in ~1 KB of library code)
 	i32_ramp_step16 = (RS.current_ramp_ms > 0) ? (int32_t)(((uint32_t)RS.ph_current_max << 16) / ((uint32_t)RS.current_ramp_ms * 16)) : 0;
 	if (RS.current_ramp_ms > 0 && i32_ramp_step16 < 1) i32_ramp_step16 = 1;
+	// field weakening: fw_current_max in fw_ramp_ms (16 FOC cycles per ms), voltage use to keep
+	if (RS.fw_current_max > RS.ph_current_max) RS.fw_current_max = RS.ph_current_max; //Id alone within the phase current
+	i32_fw_step16 = (RS.fw_current_max > 0) ? (int32_t)(((uint32_t)RS.fw_current_max << 16) / ((uint32_t)(RS.fw_ramp_ms ? RS.fw_ramp_ms : 500) * 16)) : 0;
+	if (RS.fw_current_max > 0 && i32_fw_step16 < 1) i32_fw_step16 = 1;
+	i32_fw_u_start = (_U_MAX * (RS.fw_voltage_pct ? RS.fw_voltage_pct : 90)) / 100;
 	ui16_throttle_offset = RS.throttle_offset;
 	i8_direction = RS.reverse;
 	uint32_PAS_counter = RS.pas_timeout+1;
@@ -1112,7 +1124,7 @@ int main(void)
 				static uint32_t ui32_no_current_since = 0;
 				//only with a measured KV: switching on again at speed pre-loads the voltage from KV; with the default KV
 				//the simulation showed up to 45 A at switch-on, so without a calibration the PWM stays on (old behaviour)
-				if(MS.i_q_setpoint || brake_flag || ui8_KV_detect_flag || !MS.hall_angle_detect_flag || !ui8_kv_valid) ui32_no_current_since = HAL_GetTick();
+				if(MS.i_q_setpoint || brake_flag || ui8_KV_detect_flag || !MS.hall_angle_detect_flag || !ui8_kv_valid || i32_fw_id) ui32_no_current_since = HAL_GetTick(); //not while field weakening: PWM off above the base speed = uncontrolled diode regen
 				else if(READ_BIT(TIM1->BDTR, TIM_BDTR_MOE) && (HAL_GetTick() - ui32_no_current_since) > 100){
 					CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
 					TIM1->CCR1 = 1023;
@@ -1126,6 +1138,8 @@ int main(void)
 			//enable PWM if power is wanted
 			if (MS.i_q_setpoint&&!READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)&&!ui8_overcurrent){
 				i32_iq_ramped16 = 0;   //current ramp starts from zero
+				PI_id.integral_part = 0; //no stale d voltage (e.g. from field weakening before the PWM went off)
+				PI_id.out = 0;
 
 				uint16_half_rotation_counter=0;
 				uint16_full_rotation_counter=0;
@@ -2030,6 +2044,7 @@ int main(void)
 				FOC_calculation(i16_ph1_current, i16_ph2_current, q31_rotorposition_absolute, (((int16_t)i8_direction*i8_reverse_flag)*MS.i_q_setpoint), &MS);
 #endif
 			}
+			else { i32_fw_id16 = 0; i32_fw_id = 0; i32_u_demand16 = 0; } //PWM off: no stale field weakening at the next switch-on
 			//temp5=__HAL_TIM_GET_COUNTER(&htim1);
 			//set PWM
 
@@ -2721,6 +2736,51 @@ int main(void)
 			if(i32_iq_setpoint < -i32_iq_limit){ i32_iq_setpoint = -i32_iq_limit; ui8_BC_limit_flag=1; }
 		}
 
+		// Field weakening (idea from VESC: negative Id above a duty cycle threshold, ramped, limited). Here it is closed
+		// loop: the voltage the two current controllers ask for (before the voltage limit) is kept at fw_voltage_pct of
+		// the maximum. Asking for more -> more negative Id (lower back-EMF), asking for less -> Id back to 0, both at
+		// most fw_current_max per fw_ramp_ms. So only as much weakening as the current control needs, whatever the
+		// load, while motoring and while braking (above the base speed the regen current stays controlled because
+		// the weakening stays as long as the back-EMF needs it). VESC maps the duty cycle to an Id open loop.
+		// Limits: Id >= -fw_current_max; Id and Iq together within ph_current_max (Iq is reduced, the phase current
+		// does not grow); while motoring the battery current may not exceed fw_battery_current_max because of the
+		// weakening: above it the weakening goes back (the speed drops until the battery current fits). Clamping Iq
+		// instead switched the limit on and off with the weakening and chattered in the simulation.
+		// Off (Id 0) during the hall autodetect, sensorless start up and whenever another Id setpoint is active.
+		if (i32_fw_step16 && MS.i_d_setpoint == 0 && MS.hall_angle_detect_flag && !ui8_KV_detect_flag
+#ifdef SENSORLESS
+				&& ui8_sensorless_running
+#endif
+				) {
+			int32_t i32_e = (i32_u_demand16 >> 4) - i32_fw_u_start; //>0: voltage nearly used up
+			if (i32_e > 100) i32_e = 100;                              //full ramp speed at 5 % of _U_MAX off
+			if (i32_e < -100) i32_e = -100;
+			//battery current (mA, motoring > 0 in both directions; MS.Battery_Current carries the direction sign)
+			if (!brake_flag && (q31_t_Battery_Current_accumulated >> 8) > (RS.fw_battery_current_max ? RS.fw_battery_current_max : MP.battery_current_max)) i32_e = -100;
+			i32_fw_id16 -= (i32_fw_step16 * i32_e) / 100;
+			if (i32_fw_id16 > 0) i32_fw_id16 = 0;
+			if (i32_fw_id16 < -(RS.fw_current_max << 16)) i32_fw_id16 = -(RS.fw_current_max << 16);
+		}
+		else i32_fw_id16 = 0;
+		i32_fw_id = i32_fw_id16 >> 16;
+		if (i32_fw_id) {
+			// Iq limit on the phase current circle: Iq^2 + Id^2 <= ph_current_max^2 (integer square root)
+			int32_t i32_r2 = RS.ph_current_max * RS.ph_current_max - i32_fw_id * i32_fw_id;
+			int32_t i32_iq_max = 0;
+			if (i32_r2 > 0) {
+				uint32_t ui32_bit = 1UL << 30, ui32_x = (uint32_t)i32_r2, ui32_root = 0;
+				while (ui32_bit > ui32_x) ui32_bit >>= 2;
+				while (ui32_bit) {
+					if (ui32_x >= ui32_root + ui32_bit) { ui32_x -= ui32_root + ui32_bit; ui32_root = (ui32_root >> 1) + ui32_bit; }
+					else ui32_root >>= 1;
+					ui32_bit >>= 2;
+				}
+				i32_iq_max = (int32_t)ui32_root;
+			}
+			if (i32_iq_setpoint > i32_iq_max) i32_iq_setpoint = i32_iq_max;
+			if (i32_iq_setpoint < -i32_iq_max) i32_iq_setpoint = -i32_iq_max;
+		}
+
 		//control iq
 		PI_iq.recent_value = MS.i_q;
 		PI_iq.setpoint = i32_iq_setpoint;
@@ -2729,14 +2789,15 @@ int main(void)
 
 		//Control id
 		PI_id.recent_value = MS.i_d;
-		PI_id.setpoint = MS.i_d_setpoint;
-		q31_u_d_temp = -PI_control(&PI_id); //control direct current to zero
+		PI_id.setpoint = MS.i_d_setpoint + i32_fw_id;
+		q31_u_d_temp = -PI_control(&PI_id); //control direct current to zero (or the field weakening current)
 
 
 		//limit voltage in rotating frame, refer chapter 4.10.1 of UM1052
 		//MS.u_abs = (q31_t)hypot((double)q31_u_d_temp, (double)q31_u_q_temp); //absolute value of U in static frame
 		arm_sqrt_q31((q31_u_d_temp*q31_u_d_temp+q31_u_q_temp*q31_u_q_temp)<<1,&MS.u_abs);
 		MS.u_abs = (MS.u_abs>>16)+1;
+		i32_u_demand16 += MS.u_abs - (i32_u_demand16 >> 4); //voltage asked for, before the limit (~1 ms low pass)
 
 
 		if (MS.u_abs > _U_MAX){

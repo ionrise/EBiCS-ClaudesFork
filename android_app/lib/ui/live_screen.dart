@@ -105,6 +105,7 @@ class _LiveScreenState extends State<LiveScreen> {
       ('Throttle', m == null ? '-' : '${((thr - off) * 100 ~/ span).clamp(0, 100)}  ($thr)', '%'),
       ('Brake', m == null ? '-' : ((m['brake_flag'] ?? 0) != 0 ? 'PRESSED' : 'off'), ''),
       ('Motor current', m == null ? '-' : ((m['MS.i_q'] ?? 0) * calI / 1000).toStringAsFixed(1), 'A'),
+      ('Field weakening', m == null ? '-' : ((m['i32_fw_id'] ?? 0) * calI / 1000).toStringAsFixed(1), 'A'),
       ('Battery current', m == null ? '-' : ((m['MS.Battery_Current'] ?? 0) / 1000).toStringAsFixed(1), 'A'),
       ('Pedal pulses', v('ui32_pas_events'), ''),
       ('Hall events', v('ui32_hall_events'), ''),

@@ -5,6 +5,11 @@
  *   - KingMeter 901U / KM5S: request / answer, 0x52 operation and 0x53 settings messages with the 901U
  *     handshake (ported from EBiCS display_kingmeter.c, Michael Fabry's library)
  *   - Bafang LCD (1200 baud) and 850C / 860C (9600 baud): request / answer (ported from EBiCS display_bafang.c)
+ *   - KingMeter J-LCD / 618U, UART No.2 (S866, EN06 ...), Tongsheng (VLCD5 / VLCD6 / XH18): the display sends,
+ *     the controller answers each valid frame (ported from EBiCS display_kingmeter.c, display_No_2.c,
+ *     display_tongsheng.c)
+ *   - VESC UART (115200 baud): live values for VESC displays / apps, current requests (display_vesc.c)
+ *   - EBiCS app / BLE module: ANT+ LEV pages 1 / 4 out, page 16 in (display_ebics.c)
  * Receiving and sending are interrupt driven (ring buffers), so the main loop never waits for the UART.
  *
  * This file is part of the KT firmware, GPL v3.
@@ -32,7 +37,7 @@ uint16_t ui16_display_wheel_perimeter_mm = 0;
 
 // ------------------------------------------------------------------------------------------- ring buffers
 #define RX_SIZE 64      // power of 2
-#define TX_SIZE 32      // power of 2
+#define TX_SIZE 128     // power of 2 (a VESC values answer is 79 bytes)
 // not static: the simulator test (kunteng/sim/run_sim.py) writes display messages straight into the buffer
 volatile uint8_t ui8_rx_buf[RX_SIZE];
 volatile uint8_t ui8_rx_head = 0;          // written by the interrupt
@@ -74,6 +79,21 @@ void UART2_TX_IRQHandler(void) __interrupt(UART2_TX_IRQHANDLER)
     UART2->SR &= (uint8_t) ~UART2_SR_TC;
     ui8_tx_busy = 0;
   }
+}
+
+// KT error -> KingMeter error: under voltage is the blinking battery symbol (0x91 is no KingMeter code), other
+// faults a generic code (0x25 / 0x26 mean over temperature on KingMeter displays, KT error 04 is 0x26)
+static uint8_t km_error (void)
+{
+  uint8_t ui8_e = motor_controller_get_error ();
+  if (ui8_e == MOTOR_CONTROLLER_ERROR_91_BATTERY_UNDER_VOLTAGE) { return 0x00; }
+  return ui8_e ? 0x30 : 0x00;
+}
+
+// free bytes in the TX ring
+static uint8_t tx_free (void)
+{
+  return (uint8_t) ((ui8_tx_tail - ui8_tx_head - 1) & (TX_SIZE - 1));
 }
 
 static void tx (uint8_t ui8_byte)
@@ -233,7 +253,7 @@ static void km_answer (uint8_t ui8_cmd, uint8_t ui8_handshake_index)
     ui8_buf[5] = (uint8_t) ((ui16_current * 3) / 10);              // 1/3 A
     ui8_buf[6] = (uint8_t) (ui16_period >> 8);
     ui8_buf[7] = (uint8_t) ui16_period;
-    ui8_buf[8] = motor_controller_get_error ();
+    ui8_buf[8] = km_error ();
   }
   else // 0x53 settings: handshake
   {
@@ -372,15 +392,388 @@ static void bf_poll (void)
   else { rx_drop (2); }
 }
 
+// ------------------------------------------------------------------------------------------- shared by the ports
+extern volatile uint16_t ui16_duty_cycle;
+
+static void set_assist_level (uint8_t ui8_level)
+{
+  lcd_configuration_variables.ui8_assist_level = (ui8_level > 5) ? 5 : ui8_level;
+}
+
+static void set_wheel_mm (uint16_t ui16_mm)
+{
+  if ((ui16_mm >= 500) && (ui16_mm <= 3000)) { ui16_display_wheel_perimeter_mm = ui16_mm; }
+}
+
+static void set_max_speed (uint8_t ui8_kmh)
+{
+  if ((ui8_kmh >= 5) && (ui8_kmh <= 70)) { lcd_configuration_variables.ui8_max_speed = ui8_kmh; }
+}
+
+static uint8_t xor_sum (uint8_t ui8_from, uint8_t ui8_n) // XOR of rx bytes from ... from + n - 1
+{
+  uint8_t ui8_x = 0;
+  while (ui8_n--) { ui8_x ^= rx_peek (ui8_from++); }
+  return ui8_x;
+}
+
+static uint8_t add_sum (uint8_t ui8_n) // 8 bit sum of the first n rx bytes
+{
+  uint8_t ui8_s = 0;
+  uint8_t ui8_i;
+  for (ui8_i = 0; ui8_i < ui8_n; ui8_i++) { ui8_s += rx_peek (ui8_i); }
+  return ui8_s;
+}
+
+static uint8_t battery_volts_x4 (void) // 0.25 V
+{
+  uint16_t ui16_v = (uint16_t) ((((uint32_t) motor_get_ADC_battery_voltage_filtered ()) * 1088) / 1000);
+  return (ui16_v > 255) ? 255 : (uint8_t) ui16_v;
+}
+
+// ------------------------------------------------------------------------------------------- KingMeter J-LCD / 618U
+static const uint16_t ui16_km618_wheel_mm[8] = { 1277, 1436, 1596, 1756, 1915, 2075, 2154, 2234 };
+
+// display: 0x3A, b1 (assist bits 0..2, push assist bit 4, light bit 7), b2 (speed limit bits 3..7, wheel bits 0..2),
+// b3, XOR of b1..b3. Answer: 0x46, battery, current (1/3 A), wheel time (ms, hi lo), 0x7A, error, XOR of 1..6
+static void km618_poll (void)
+{
+  uint8_t ui8_buf[8];
+  uint8_t ui8_i;
+  uint16_t ui16_period;
+
+  while (rx_count () && (rx_peek (0) != 0x3A)) { rx_drop (1); }
+  if (rx_count () < 5) { return; }
+  if (xor_sum (1, 3) != rx_peek (4)) { rx_drop (1); return; }
+  set_assist_level (rx_peek (1) & 0x07);
+  set_max_speed (((rx_peek (2) & 0xF8) >> 3) + 10);
+  set_wheel_mm (ui16_km618_wheel_mm[rx_peek (2) & 0x07]);
+  rx_drop (5);
+
+  ui16_period = wheel_period_ms ();
+  if (ui16_period > 0x0DAC) { ui16_period = 0x0DAC; }
+  ui8_buf[0] = 0x46;
+  ui8_buf[1] = (battery_bars_x4 () <= 3) ? 0x00 : 0x01; // none of bits 0..2: the battery symbol blinks
+  ui8_buf[2] = (uint8_t) ((battery_current_x10 () * 3) / 10);
+  ui8_buf[3] = (uint8_t) (ui16_period >> 8);
+  ui8_buf[4] = (uint8_t) ui16_period;
+  ui8_buf[5] = 0x7A;
+  ui8_buf[6] = km_error ();
+  ui8_buf[7] = 0;
+  for (ui8_i = 1; ui8_i < 7; ui8_i++) { ui8_buf[7] ^= ui8_buf[ui8_i]; }
+  for (ui8_i = 0; ui8_i < 8; ui8_i++) { tx (ui8_buf[ui8_i]); }
+}
+
+// ------------------------------------------------------------------------------------------- UART No.2
+// display: 20 bytes 0x01 0x14 ..., byte 19 = XOR of bytes 0 ... 18. Assist level byte 4, wheel size inch x10
+// bytes 7/8, speed limit byte 12. Answer: 14 bytes 0x02 0x0E 0x01, error, brake (bit 5), current x10 (6/7),
+// wheel time ms (8/9), byte 13 = XOR of bytes 0 ... 12
+static void no2_poll (void)
+{
+  uint8_t ui8_buf[14];
+  uint8_t ui8_i;
+  uint8_t ui8_level;
+  uint8_t ui8_error;
+  uint16_t ui16_v;
+
+  while (rx_count () >= 2 && !((rx_peek (0) == 0x01) && (rx_peek (1) == 0x14))) { rx_drop (1); }
+  if (rx_count () < 20) { return; }
+  if (xor_sum (0, 19) != rx_peek (19)) { rx_drop (1); return; }
+  ui8_level = rx_peek (4);                     // 0 ... 5, or 0 ... 9 on displays set to 9 levels
+  // levels above 5 (9 level displays) stay at 5: scaling them gave 6 -> 3, less than level 5
+  set_assist_level (ui8_level);
+  ui16_v = (((uint16_t) rx_peek (7)) << 8) | rx_peek (8);
+  set_wheel_mm ((uint16_t) (((uint32_t) ui16_v * 798) / 100)); // inch x10 -> mm (x 25.4 x pi / 10)
+  set_max_speed (rx_peek (12));
+  rx_drop (20);
+
+  ui8_error = motor_controller_get_error ();
+  if (ui8_error == MOTOR_CONTROLLER_ERROR_91_BATTERY_UNDER_VOLTAGE) { ui8_error = 0; } // display shows its own
+  else if ((ui8_error == MOTOR_CONTROLLER_ERROR_HALL) || (ui8_error == MOTOR_CONTROLLER_ERROR_06_SHORT_CIRCUIT)) { ui8_error = 7; } // motor failure
+  else if (ui8_error) { ui8_error = 9; }      // controller failure
+  ui16_v = battery_current_x10 ();
+  ui8_buf[0] = 0x02;
+  ui8_buf[1] = 0x0E;
+  ui8_buf[2] = 0x01;
+  ui8_buf[3] = ui8_error;
+  ui8_buf[4] = brake_is_set () ? 0x20 : 0x00;
+  ui8_buf[5] = 0;
+  ui8_buf[6] = (uint8_t) (ui16_v >> 8);
+  ui8_buf[7] = (uint8_t) ui16_v;
+  ui16_v = wheel_period_ms ();
+  ui8_buf[8] = (uint8_t) (ui16_v >> 8);
+  ui8_buf[9] = (uint8_t) ui16_v;
+  ui8_buf[10] = 0;
+  ui8_buf[11] = 0;
+  ui8_buf[12] = 0xFF;
+  ui8_buf[13] = 0;
+  for (ui8_i = 0; ui8_i < 13; ui8_i++) { ui8_buf[13] ^= ui8_buf[ui8_i]; }
+  for (ui8_i = 0; ui8_i < 14; ui8_i++) { tx (ui8_buf[ui8_i]); }
+}
+
+// ------------------------------------------------------------------------------------------- Tongsheng
+// display: 7 bytes 0x59, b1 (light 0x01, level 3 0x02, 4 0x04, 5 0x08, 0 0x10, walk 0x20, 2 0x40, 1 0x80),
+// b2, wheel inch, b4, speed limit, sum of bytes 0 ... 5. Answer: 9 bytes 0x43, battery 0 ... 12, status
+// (bit 0 under voltage, bit 2 motor working), 0, current x10, error, wheel time (2 ms, low high), sum of 0 ... 7
+static void ts_poll (void)
+{
+  uint8_t ui8_buf[9];
+  uint8_t ui8_i;
+  uint8_t ui8_b;
+  uint16_t ui16_v;
+  uint16_t ui16_lo;
+  uint16_t ui16_hi;
+
+  while (rx_count () && (rx_peek (0) != 0x59)) { rx_drop (1); }
+  if (rx_count () < 7) { return; }
+  if (add_sum (6) != rx_peek (6)) { rx_drop (1); return; }
+  ui8_b = rx_peek (1);
+  if (ui8_b & 0x08) { ui8_i = 5; }
+  else if (ui8_b & 0x04) { ui8_i = 4; }
+  else if (ui8_b & 0x02) { ui8_i = 3; }
+  else if (ui8_b & 0x40) { ui8_i = 2; }
+  else if (ui8_b & 0x80) { ui8_i = 1; }
+  else { ui8_i = 0; }
+  set_assist_level (ui8_i);                    // walk assist (0x20) and light: not on the KT controller
+  ui8_b = rx_peek (3);
+  if (ui8_b) { set_wheel_mm ((uint16_t) ui8_b * 80); } // inch -> mm (x 25.4 x pi)
+  set_max_speed (rx_peek (5));
+  rx_drop (7);
+
+  // battery 0 ... 12 between the 20 % and 100 % voltages of the battery bars
+  ui16_v = motor_get_ADC_battery_voltage_filtered () * ADC_BATTERY_VOLTAGE_K;
+  ui16_lo = kt_settings.ui16_battery_pack_volts_x256[3];
+  ui16_hi = kt_settings.ui16_battery_pack_volts_x256[0];
+  if (ui16_v <= ui16_lo) { ui8_buf[1] = 0; }
+  else if (ui16_v >= ui16_hi) { ui8_buf[1] = 12; }
+  else { ui8_buf[1] = (uint8_t) (((uint32_t) (ui16_v - ui16_lo) * 12) / (ui16_hi - ui16_lo)); }
+  ui8_buf[0] = 0x43;
+  ui8_buf[2] = ((motor_controller_get_error () == MOTOR_CONTROLLER_ERROR_91_BATTERY_UNDER_VOLTAGE) ? 0x01 : 0x00) |
+               (ui16_motor_get_motor_speed_erps () ? 0x04 : 0x00);
+  ui8_buf[3] = 0;
+  ui16_v = battery_current_x10 ();
+  ui8_buf[4] = (ui16_v > 255) ? 255 : (uint8_t) ui16_v;
+  ui8_buf[5] = 0;                              // only "temperature protection" is defined: no sensor on KT
+  ui16_v = wheel_period_ms () >> 1;
+  if (ui16_v > 0x0700) { ui16_v = 0x0700; }
+  ui8_buf[6] = (uint8_t) ui16_v;
+  ui8_buf[7] = (uint8_t) (ui16_v >> 8);
+  ui8_buf[8] = 0;
+  for (ui8_i = 0; ui8_i < 8; ui8_i++) { ui8_buf[8] += ui8_buf[ui8_i]; }
+  for (ui8_i = 0; ui8_i < 9; ui8_i++) { tx (ui8_buf[ui8_i]); }
+}
+
+// ------------------------------------------------------------------------------------------- VESC UART
+// packet: 0x02, length, payload, CRC16-CCITT (XMODEM) of the payload high low, 0x03. Answers COMM_FW_VERSION and
+// COMM_GET_VALUES; COMM_SET_CURRENT replaces throttle / PAS until 1 s after the last command (the brake still
+// wins in the motor control). Not a full VESC: no configuration from VESC Tool.
+#define COMM_FW_VERSION         0
+#define COMM_GET_VALUES         4
+#define COMM_SET_DUTY           5
+#define COMM_SET_CURRENT        6
+#define COMM_SET_CURRENT_BRAKE  7
+#define COMM_ALIVE              30
+#define VESC_TIMEOUT            7  // x 150 ms
+
+static uint16_t ui16_vesc_crc;
+static uint16_t ui16_vesc_current_10b = 0;
+static uint8_t ui8_vesc_timeout = 0;
+
+static uint16_t crc16_step (uint16_t ui16_crc, uint8_t ui8_byte)
+{
+  uint8_t ui8_i;
+  ui16_crc ^= ((uint16_t) ui8_byte) << 8;
+  for (ui8_i = 0; ui8_i < 8; ui8_i++) { ui16_crc = (ui16_crc & 0x8000) ? ((ui16_crc << 1) ^ 0x1021) : (ui16_crc << 1); }
+  return ui16_crc;
+}
+
+static void vesc_byte (uint8_t ui8_byte)
+{
+  ui16_vesc_crc = crc16_step (ui16_vesc_crc, ui8_byte);
+  tx (ui8_byte);
+}
+
+static void vesc_16 (uint16_t ui16_v) { vesc_byte ((uint8_t) (ui16_v >> 8)); vesc_byte ((uint8_t) ui16_v); }
+static void vesc_32 (int32_t i32_v) { vesc_16 ((uint16_t) (i32_v >> 16)); vesc_16 ((uint16_t) i32_v); }
+static void vesc_zeros (uint8_t ui8_n) { while (ui8_n--) { vesc_byte (0); } }
+
+static void vesc_start (uint8_t ui8_len, uint8_t ui8_cmd)
+{
+  tx (0x02);
+  tx (ui8_len);
+  ui16_vesc_crc = 0;
+  vesc_byte (ui8_cmd);
+}
+
+static void vesc_end (void)
+{
+  tx ((uint8_t) (ui16_vesc_crc >> 8));
+  tx ((uint8_t) ui16_vesc_crc);
+  tx (0x03);
+}
+
+static void vesc_values (void)
+{
+  int32_t i32_input = ((int32_t) motor_get_current_filtered_10b () * 25) / 2; // 0.125 A -> 0.01 A
+  int32_t i32_motor = i32_input;
+  uint16_t ui16_duty = ui16_duty_cycle;
+  uint8_t ui8_error = motor_controller_get_error ();
+  uint8_t ui8_fault = 0;
+
+  // phase current ~ battery current / duty cycle (not below 1/4 duty: the estimate gets too uncertain)
+  if (ui16_duty < 127) { ui16_duty = 127; }
+  if (ui16_duty < 508) { i32_motor = (i32_motor * 508) / ui16_duty; }
+  if (ui8_error == MOTOR_CONTROLLER_ERROR_OVER_VOLTAGE) { ui8_fault = 1; }
+  else if (ui8_error == MOTOR_CONTROLLER_ERROR_91_BATTERY_UNDER_VOLTAGE) { ui8_fault = 2; }
+  else if (ui8_error == MOTOR_CONTROLLER_ERROR_06_SHORT_CIRCUIT) { ui8_fault = 4; }
+
+  vesc_start (74, COMM_GET_VALUES);
+  vesc_zeros (4);                                          // FET and motor temperature: no sensors
+  vesc_32 (i32_motor);                                     // motor current, 0.01 A
+  vesc_32 (i32_input);                                     // battery current, 0.01 A
+  vesc_32 (0);                                             // id
+  vesc_32 (i32_motor);                                     // iq
+  vesc_16 ((uint16_t) (((uint32_t) ui16_duty_cycle * 1000) / 508)); // duty cycle, 0.1 %
+  vesc_32 ((int32_t) ui16_motor_get_motor_speed_erps () * 60);     // electrical rpm
+  vesc_16 ((uint16_t) (((uint32_t) motor_get_ADC_battery_voltage_filtered () * 272) / 100)); // 0.1 V (16 bit overflowed above 65 V)
+  vesc_zeros (24);                                         // Ah, Ah charged, Wh, Wh charged, tacho, tacho abs
+  vesc_byte (ui8_fault);
+  vesc_zeros (4 + 1 + 6 + 8 + 1);                          // pid pos, controller id, 3 MOSFET temps, vd, vq, status
+  vesc_end ();
+}
+
+static void vesc_poll (void)
+{
+  uint8_t ui8_len;
+  uint8_t ui8_i;
+  uint16_t ui16_crc = 0;
+  int32_t i32_ma;
+
+  while (rx_count () && ((rx_peek (0) != 0x02) || (rx_count () >= 2 && ((rx_peek (1) == 0) || (rx_peek (1) > 8)))))  // longest handled frame: a false header stalls 13 bytes at most
+  {
+    rx_drop (1);
+  }
+  if (rx_count () < 2) { return; }
+  ui8_len = rx_peek (1);
+  if (rx_count () < (uint8_t) (ui8_len + 5)) { return; }
+  for (ui8_i = 0; ui8_i < ui8_len; ui8_i++) { ui16_crc = crc16_step (ui16_crc, rx_peek (2 + ui8_i)); }
+  if ((rx_peek (4 + ui8_len) != 0x03) || (rx_peek (2 + ui8_len) != (uint8_t) (ui16_crc >> 8)) ||
+      (rx_peek (3 + ui8_len) != (uint8_t) ui16_crc))
+  {
+    rx_drop (1);
+    return;
+  }
+  switch (rx_peek (2))
+  {
+    case COMM_FW_VERSION:
+    if (tx_free () < 33) { return; }                       // whole answer must fit: answered on a later call
+    vesc_start (28, COMM_FW_VERSION);
+    vesc_byte (6);                                         // major
+    vesc_byte (0);                                         // minor
+    vesc_byte ('E'); vesc_byte ('B'); vesc_byte ('i'); vesc_byte ('C'); vesc_byte ('S');
+    vesc_byte ('-'); vesc_byte ('K'); vesc_byte ('T'); vesc_byte (0); // hardware name
+    vesc_zeros (12 + 4);                                   // UUID (the STM8S105 has none), pairing, test, hw type, configs
+    vesc_end ();
+    break;
+    case COMM_GET_VALUES:
+    if (tx_free () < 79) { return; }
+    vesc_values ();
+    break;
+    case COMM_SET_CURRENT:
+    if (ui8_len >= 5)
+    {
+      i32_ma = (((int32_t) rx_peek (3)) << 24) | (((int32_t) rx_peek (4)) << 16) | (((uint16_t) rx_peek (5)) << 8) | rx_peek (6);
+      if (i32_ma < 0) { i32_ma = 0; }                      // no regen over VESC commands
+      if (i32_ma > 60000) { i32_ma = 60000; }
+      ui16_vesc_current_10b = (uint16_t) (i32_ma / 125);   // ebike_app limits it to the motor current
+      ui8_vesc_timeout = VESC_TIMEOUT;
+    }
+    break;
+    case COMM_SET_CURRENT_BRAKE:
+    case COMM_SET_DUTY:                                    // not supported: no drive
+    ui16_vesc_current_10b = 0;
+    ui8_vesc_timeout = VESC_TIMEOUT;
+    break;
+    case COMM_ALIVE:
+    if (ui8_vesc_timeout) { ui8_vesc_timeout = VESC_TIMEOUT; }
+    break;
+    default:
+    break;
+  }
+  rx_drop (ui8_len + 5);
+}
+
+uint16_t display_current_request (void)
+{
+  return ui8_vesc_timeout ? ui16_vesc_current_10b : 0xFFFF;
+}
+
+// ------------------------------------------------------------------------------------------- EBiCS (ANT+ LEV pages)
+// 12 bytes: 164, 12, 0x4E, page, 7 data bytes, XOR of bytes 0 ... 10. The app / BLE module sends page 16 (wheel
+// circumference mm low high, travel mode: assist level bits 3..5, display command), the controller sends
+// page 1 (assist level, error, speed km/h x10) and page 4 (battery current A x100, voltage 0.25 V) in turn.
+static uint8_t ui8_ebics_page = 1;
+
+static void ebics_poll (void)
+{
+  while (rx_count () >= 2 && !((rx_peek (0) == 164) && (rx_peek (1) == 12))) { rx_drop (1); }
+  if (rx_count () < 12) { return; }
+  if (xor_sum (0, 11) != rx_peek (11)) { rx_drop (1); return; }
+  if (rx_peek (3) == 16)
+  {
+    set_wheel_mm ((((uint16_t) rx_peek (5)) << 8) | rx_peek (4));
+    set_assist_level ((rx_peek (6) >> 3) & 0x07);
+  }
+  rx_drop (12);
+}
+
+static void ebics_send_page (void)
+{
+  uint8_t ui8_buf[12];
+  uint8_t ui8_i;
+  uint16_t ui16_v;
+
+  ui8_buf[0] = 164;
+  ui8_buf[1] = 12;
+  ui8_buf[2] = 0x4E;
+  ui8_buf[3] = ui8_ebics_page;
+  for (ui8_i = 4; ui8_i < 12; ui8_i++) { ui8_buf[ui8_i] = 0; }
+  if (ui8_ebics_page == 1)
+  {
+    ui16_v = (f_wheel_speed < 0.1) ? 0 : (uint16_t) (f_wheel_speed * 10);
+    if (ui16_v > 0x7FF) { ui16_v = 0x7FF; }
+    ui8_buf[4] = 1;                                        // temperature state: no sensor
+    ui8_buf[5] = (uint8_t) (lcd_configuration_variables.ui8_assist_level << 3);
+    ui8_buf[8] = motor_controller_get_error ();
+    ui8_buf[9] = (uint8_t) ui16_v;
+    ui8_buf[10] = (uint8_t) (ui16_v >> 8);
+    ui8_ebics_page = 4;
+  }
+  else
+  {
+    ui16_v = battery_current_x10 () * 10;                  // A x100, 12 bits
+    if (ui16_v > 0x0FFF) { ui16_v = 0x0FFF; }
+    ui8_buf[6] = (uint8_t) ((ui16_v >> 8) << 4);
+    ui8_buf[7] = (uint8_t) ui16_v;
+    ui8_buf[8] = battery_volts_x4 ();
+    ui8_ebics_page = 1;
+  }
+  for (ui8_i = 0; ui8_i < 11; ui8_i++) { ui8_buf[11] ^= ui8_buf[ui8_i]; }
+  for (ui8_i = 0; ui8_i < 12; ui8_i++) { tx (ui8_buf[ui8_i]); }
+}
+
 // ------------------------------------------------------------------------------------------- dispatch
 uint32_t display_baudrate (void)
 {
-  return (kt_settings.ui8_display == DISPLAY_BAFANG_LCD) ? 1200 : 9600;
+  if (kt_settings.ui8_display == DISPLAY_BAFANG_LCD) { return 1200; }
+  if (kt_settings.ui8_display == DISPLAY_VESC) { return 115200; }
+  return 9600;
 }
 
 void display_init (void)
 {
   if (kt_settings.ui8_display != DISPLAY_KT) { use_default_lcd_values (); }
+  if (kt_settings.ui8_display == DISPLAY_VESC) { lcd_configuration_variables.ui8_assist_level = 3; } // no levels from VESC devices
   UART2->CR2 |= UART2_CR2_RIEN;
 }
 
@@ -391,6 +784,11 @@ void display_poll (void)
     case DISPLAY_KINGMETER: km_poll (); break;
     case DISPLAY_BAFANG_LCD:
     case DISPLAY_BAFANG_TFT: bf_poll (); break;
+    case DISPLAY_KM_618U: km618_poll (); break;
+    case DISPLAY_NO2: no2_poll (); break;
+    case DISPLAY_TONGSHENG: ts_poll (); break;
+    case DISPLAY_VESC: vesc_poll (); break;
+    case DISPLAY_EBICS: ebics_poll (); break;
     default: kt_poll (); break;
   }
 }
@@ -398,4 +796,6 @@ void display_poll (void)
 void display_controller (void)
 {
   if (kt_settings.ui8_display == DISPLAY_KT) { kt_send_status (); } // the KT display expects it every 150 ms
+  else if (kt_settings.ui8_display == DISPLAY_EBICS) { ebics_send_page (); }
+  if (ui8_vesc_timeout) { ui8_vesc_timeout--; }
 }

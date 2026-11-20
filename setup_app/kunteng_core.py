@@ -30,7 +30,9 @@ CHOICES = {
               ("28 inch", 0x1C), ("29 inch", 0x1E)],
     "pas_direction": [("Right (normal)", 0), ("Left", 1)],
     "display": [("Kunteng KT-LCD3 / LCD5 / LCD8", 0), ("KingMeter 901U / KM5S", 1), ("Bafang LCD (1200 baud)", 2),
-                ("Bafang 850C / 860C (9600 baud)", 3)],
+                ("Bafang 850C / 860C (9600 baud)", 3), ("KingMeter J-LCD / 618U", 4),
+                ("UART No.2 (S866, EN06 ...)", 5), ("Tongsheng VLCD5 / VLCD6 / XH18", 6),
+                ("VESC UART (115200 baud)", 7), ("EBiCS app / BLE module", 8)],
 }
 
 FIELDS = [
@@ -39,7 +41,9 @@ FIELDS = [
      "Which KT controller you have. The 12 MOSFET boards (S12S) allow more current."),
     ("display", "Display", "choice", 0, "basic", "",
      "Display protocol. KT-LCD3/5/8 use the Kunteng protocol. Multi protocol displays: set the same protocol "
-     "in the display menu. KingMeter and Bafang displays: assist levels are mapped to the 5 levels below."),
+     "in the display menu. Other displays: assist levels are mapped to the 5 levels below; walk assist and "
+     "lights are not available on KT. VESC: live values and current commands for VESC displays / apps (assist "
+     "level 3). EBiCS: the EBiCS app with the BLE module."),
     ("cells", "Battery cells in series", "int", 10, "basic", "S",
      "7S = 24 V, 10S = 36 V, 13S = 48 V, 14S = 52 V. Sets the low voltage cutoff (3.0 V per cell) and the battery bars."),
     ("motor_current_a", "Max motor current", "int", 15, "basic", "A",
@@ -75,6 +79,21 @@ FIELDS = [
      "P1; with KingMeter/Bafang displays this value is used for the speed."),
     ("over_voltage_protection", "Over voltage protection", "bool", False, "advanced", "",
      "Stops the motor above 4.2 V per cell (shows error 05) and restarts when the voltage drops again."),
+    ("fw_angle_deg", "Field weakening: max angle", "int", 0, "advanced", "deg",
+     "More top speed: once the full battery voltage is used and more power is wanted, the field is turned in front "
+     "of the rotor (negative Id). 0 = off. 20 ... 40 deg is typical; more angle = more speed but more phase current "
+     "and heat at the same power. Watch the motor temperature."),
+    ("fw_battery_a", "Field weakening: battery current", "int", 0, "advanced", "A",
+     "Battery current limit while field weakening (0 = the max motor current). Lower it to limit the power at "
+     "high speed."),
+    ("fw_phase_a", "Field weakening: phase current", "int", 0, "advanced", "A",
+     "Peak phase current limit while field weakening, measured on phase B (0 = 15 A, the range of the sensor). "
+     "The weakening current flows in the motor without showing on the battery current."),
+    ("fw_ramp_dps", "Field weakening: ramp speed", "int", 30, "advanced", "deg/s",
+     "How fast the angle may change. Faster reacts quicker, slower is smoother. When the weakening is not "
+     "allowed any more (brake, over a limit) it goes back 2x faster."),
+    ("fw_throttle_only", "Field weakening only with the throttle", "bool", False, "advanced", "",
+     "Tick to use field weakening only while the throttle is pressed, not with PAS alone."),
     # expert
     ("rotor_offset_angle", "Hall sensor angle offset", "int", 202, "expert", "/256",
      "Angle between the hall sensors and the rotor (256 = 360 deg). 202 fits the Q85/Q100 geared motors. "
@@ -142,6 +161,14 @@ def check_settings(s):
         p.append("Motor constant must be 1 ... 255.")
     if not -500 <= int(s.get("foc_delay_us", 0)) <= 500:
         p.append("FOC delay compensation must be -500 ... 500 us.")
+    if not 0 <= int(s.get("fw_angle_deg", 0)) <= 60:
+        p.append("Field weakening angle must be 0 ... 60 deg.")
+    if not 0 <= int(s.get("fw_battery_a", 0)) <= 30:
+        p.append("Field weakening battery current must be 0 ... 30 A.")
+    if not 0 <= int(s.get("fw_phase_a", 0)) <= 15:
+        p.append("Field weakening phase current must be 0 ... 15 A (sensor range).")
+    if not 5 <= int(s.get("fw_ramp_dps", 30)) <= 120:
+        p.append("Field weakening ramp must be 5 ... 120 deg/s.")
     if not 5 <= int(s["erps_interpolation"]) <= 100:
         p.append("Speed for sine wave mode must be 5 ... 100 erps.")
     return p
@@ -185,6 +212,7 @@ SETTINGS_BLOCK_ADDR = 0x4080
 SETTINGS_BLOCK_LEN = 32
 SETTINGS_BLOCK_VERSION = 1
 FLAG_DIRECT_DRIVE, FLAG_PAS_LEFT, FLAG_OVER_VOLTAGE, FLAG_NO_PHASE_LIMIT, FLAG_NO_HALL_LEARNING = 1, 2, 4, 8, 16
+FLAG_FW_THROTTLE_ONLY = 32
 
 
 def settings_block(s):
@@ -193,7 +221,8 @@ def settings_block(s):
              (FLAG_PAS_LEFT if int(s["pas_direction"]) == 1 else 0) |
              (FLAG_OVER_VOLTAGE if s["over_voltage_protection"] else 0) |
              (0 if s.get("phase_current_limit", True) else FLAG_NO_PHASE_LIMIT) |
-             (0 if s.get("hall_learning", True) else FLAG_NO_HALL_LEARNING))
+             (0 if s.get("hall_learning", True) else FLAG_NO_HALL_LEARNING) |
+             (FLAG_FW_THROTTLE_ONLY if s.get("fw_throttle_only", False) else 0))
     b = bytearray(SETTINGS_BLOCK_LEN)
     b[0:4] = bytes([ord("K"), ord("T"), SETTINGS_BLOCK_VERSION, SETTINGS_BLOCK_LEN])
     b[4] = int(s["cells"])
@@ -216,6 +245,10 @@ def settings_block(s):
     b[24] = int(round(float(s.get("ramp_s", 0.4)) * 10))
     b[25] = int(int(s.get("foc_delay_us", 0)) / 4) & 0xFF   # int8
     b[26] = int(s.get("motor_characteristic", 202))
+    b[27] = int(s.get("fw_angle_deg", 0))
+    b[28] = int(s.get("fw_battery_a", 0))
+    b[29] = int(s.get("fw_phase_a", 0))
+    b[30] = int(s.get("fw_ramp_dps", 30))
     b[31] = (~sum(b[:31])) & 0xFF
     return bytes(b)
 

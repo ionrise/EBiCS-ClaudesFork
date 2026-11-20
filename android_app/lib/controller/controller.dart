@@ -221,7 +221,7 @@ class Controller extends ChangeNotifier {
     'ui16_throttle': 'u16', 'ui16_throttle_offset': 'u16', 'uint16_full_rotation_counter': 'u16',
     'i16_hall_order': 'i16', 'ui32_KV': 'i16', 'ui8_watchdog_reset': 'u8', 'ui16_motor_temp_adc': 'u16',
     'ui8_sensorless_running': 'u8', 'ui8_settings_source': 'u8', 'ui8_motor_temp_sensor_ok': 'u8',
-    'ui8_setup_hall_spread': 'u8',
+    'ui8_setup_hall_spread': 'u8', 'i32_fw_id': 'i32',
   };
 
   /// Autodetect forward / backward readings, same order as [halls].

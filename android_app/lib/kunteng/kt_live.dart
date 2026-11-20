@@ -26,6 +26,7 @@ const ktLiveVars = <KtLiveVar>[
   KtLiveVar('ui8_coasting', 'u8', 'Coasting (PWM off)', '', 1),
   KtLiveVar('ui16_emf_duty_per_erps_x256', 'u16', 'Back-EMF constant', '', 1),
   KtLiveVar('i8_hall_offset', 'i8x8', 'Learned hall offsets', '/256', 1),
+  KtLiveVar('ui8_fw_angle', 'u8', 'Field weakening angle', 'deg', 1.40625),
 ];
 
 const _stateBits = <(int, String)>[

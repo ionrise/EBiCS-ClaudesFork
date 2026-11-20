@@ -628,7 +628,7 @@ class FlashPage(Page):
 
 class LivePage(Page):
     TILES = [("battery", "Battery", "V"), ("speed", "Speed", "km/h"), ("assist", "Assist level", ""),
-             ("throttle", "Throttle", "%"), ("brake", "Brake", ""), ("motor_a", "Motor current", "A"),
+             ("throttle", "Throttle", "%"), ("brake", "Brake", ""), ("motor_a", "Motor current", "A"), ("fw_a", "Field weakening", "A"),
              ("battery_a", "Battery current", "A"), ("pas", "Pedal pulses", ""), ("halls", "Hall events", ""),
              ("temp", "Controller temp", "\u00b0C"), ("calibrated", "Motor calibrated", ""), ("kv", "KV", ""),
              ("motor_temp", "Motor temp", "\u00b0C"), ("wire_raw", "Speed/temp wire (raw ADC)", ""),
@@ -690,6 +690,7 @@ class LivePage(Page):
             put("throttle", f"{max(0, min(100, (thr - off) * 100 // span))}   ({thr})")
             put("brake", "PRESSED" if snap.get("brake_flag") else "off")
             put("motor_a", f"{(snap.get('MS.i_q') or 0) * cal_i / 1000:.1f}")
+            put("fw_a", f"{(snap.get('i32_fw_id') or 0) * cal_i / 1000:.1f}")
             put("battery_a", f"{(snap.get('MS.Battery_Current') or 0) / 1000:.1f}")
             put("pas", str(snap.get("ui32_pas_events", "-")))
             put("halls", str(snap.get("ui32_hall_events", "-")))

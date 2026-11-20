@@ -56,6 +56,7 @@ def struct_offsets():
              "pas_max_cadence", "a1", "a2", "a3", "a4", "a5", "rotor_offset_angle", "foc_angle_adjust",
              "erps_interpolation", "default_max_speed", "default_wheel_size", "controller_type",
              "phase_current_factor_x10", "display", "ramp_x10", "foc_delay_x4us", "motor_characteristic",
+             "fw_angle_deg", "fw_battery_a", "fw_phase_a", "fw_ramp_dps",
              "adc_battery_voltage_max", "adc_battery_voltage_min",
              "communications_battery_voltage"]
     off = {n: i for i, n in enumerate(names)}
@@ -65,7 +66,11 @@ def struct_offsets():
     off["pas_max_cadence_ticks"] = i
     off["pas_min_cadence_ticks"] = i + 2
     off["phase_current_max"] = i + 4
-    off["from_eeprom"] = i + 5
+    off["fw_angle_max"] = i + 5
+    off["fw_battery_x2"] = i + 6
+    off["fw_phase_peak"] = i + 7
+    off["fw_step_x256"] = i + 8          # uint16, big endian
+    off["from_eeprom"] = i + 10
     return off
 
 
@@ -229,6 +234,61 @@ def km_sum_ok(m):
     return m[4 + n] == (sm & 0xFF) and m[5 + n] == (sm >> 8)
 
 
+def xor(b):
+    x = 0
+    for v in b:
+        x ^= v
+    return x
+
+
+def crc16(b):
+    c = 0
+    for v in b:
+        c ^= v << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021) & 0xFFFF if c & 0x8000 else (c << 1) & 0xFFFF
+    return c
+
+
+def vesc_packet(payload):
+    c = crc16(payload)
+    return bytes([0x02, len(payload)] + list(payload) + [c >> 8, c & 0xFF, 0x03])
+
+
+def vesc_packets(out):
+    """Valid VESC packets in the UART output: [payload, ...]"""
+    res, i = [], 0
+    while i + 5 <= len(out):
+        n = out[i + 1]
+        if out[i] == 0x02 and n and i + n + 5 <= len(out) and out[i + n + 4] == 0x03 and \
+                crc16(out[i + 2:i + 2 + n]) == (out[i + 2 + n] << 8 | out[i + 3 + n]):
+            res.append(out[i + 2:i + 2 + n])
+            i += n + 5
+        else:
+            i += 1
+    return res
+
+
+def display_run(ihx, syms, display, frames, extra_ms=50, dumps=()):
+    """Boot with the display protocol, feed the frames (20 ms apart), return (dumps, uart output)."""
+    s = kt.default_settings()
+    s.update(display=display)
+    sim = Sim(ihx, syms)
+    boot(sim, kt.settings_block(s))
+    sim.run_ms(100)
+    pos = 0
+    for f in frames:
+        pos = feed_display(sim, syms, f, pos)
+        sim.run_ms(20)
+    sim.run_ms(extra_ms)
+    sim.dump("lcd", syms["lcd_configuration_variables"], 6)
+    sim.dump("wheel", "ui16_display_wheel_perimeter_mm", 2)
+    for tag, name, n in dumps:
+        sim.dump(tag, name, n)
+    res = sim.go(uart_in=b"")
+    return res, sim.uart_out
+
+
 def feed_display(sim, syms, data, pos):
     """Put bytes into the firmware's UART receive buffer as if the display had sent them (ucsim's UART input
     model does not deliver them). pos: current head position, returns the new one."""
@@ -247,7 +307,10 @@ def check(cond, text, fails):
 
 
 def main():
-    out = os.path.join(FW, "build", "sim")
+    # own build directory per run: two runs at the same time used to rebuild kunteng/build/sim under each
+    # other, and one of them read the other's map file (wrong addresses, e.g. autodetect "state 6")
+    import tempfile
+    out = tempfile.mkdtemp(prefix="kt_sim_build_")
     print("building firmware for the simulator (-DSIMULATION) ...")
     ihx = build.build(out, ["SIMULATION"], log=lambda _l: None)
     syms = symbols(os.path.join(out, "main.map"))
@@ -256,12 +319,13 @@ def main():
 
     # ---------------------------------------------------------------- 1 + 2 + 3
     s = kt.default_settings()
-    s.update(cells=13, motor_current_a=18, controller=2, pas_magnets=12, rotor_offset_angle=200, erps_interpolation=15)
+    s.update(cells=13, motor_current_a=18, controller=2, pas_magnets=12, rotor_offset_angle=200, erps_interpolation=15,
+             fw_angle_deg=40, fw_battery_a=0, fw_phase_a=10, fw_ramp_dps=60)
     block = kt.settings_block(s)
     sim = Sim(ihx, syms)
     boot(sim, block)
     sim.setmem(0x53F2, [180])   # 13S at ~49 V: 180 * 0.272
-    sim.dump("settings", "kt_settings", 44)
+    sim.dump("settings", "kt_settings", 52)
     # constant speed, hall sensors evenly spaced
     hall_run(sim, 50, 30)
     sim.dump("erps", "ui16_motor_speed_erps", 2)
@@ -279,13 +343,17 @@ def main():
 
     st = r.get("settings", b"")
     print("settings block -> kt_settings")
-    check(len(st) >= 44 and st[off["from_eeprom"]] == 1, "settings block accepted", fails)
-    if len(st) >= 44:
+    check(len(st) >= 52 and st[off["from_eeprom"]] == 1, "settings block accepted", fails)
+    if len(st) >= 52:
         check(st[off["cells"]] == 13 and st[off["motor_current_a"]] == 18 and st[off["pas_magnets"]] == 12,
               "cells 13, current 18 A, 12 PAS magnets", fails)
         check(st[off["adc_battery_voltage_max"]] == (13 * 420) // 27, "battery max from cells (%d)" % st[off["adc_battery_voltage_max"]], fails)
         check(st[off["communications_battery_voltage"]] == 48, "display voltage 48 V", fails)
         check(st[off["phase_current_max"]] == 90, "phase current limit 18 A * 2.5 = 90 steps (%d)" % st[off["phase_current_max"]], fails)
+        fw = (st[off["fw_angle_max"]], st[off["fw_battery_x2"]], st[off["fw_phase_peak"]],
+              int.from_bytes(st[off["fw_step_x256"]:off["fw_step_x256"] + 2], "big"))
+        check(fw == (28, 36, 83, 109), "field weakening 40 deg -> 28/256, battery 0 -> 18 A = 36 steps, phase 10 A -> 83 "
+              "steps, 60 deg/s -> 109 per 10 ms %s" % (fw,), fails)
     erps = int.from_bytes(r.get("erps", b"\0\0")[:2], "little")
     print("hall sequence at 50 erps")
     # SDCC stores 16 bit values big endian
@@ -315,11 +383,11 @@ def main():
     # ---------------------------------------------------------------- 4: no block -> defaults
     sim = Sim(ihx, syms)
     boot(sim, None)
-    sim.dump("settings", "kt_settings", 44)
+    sim.dump("settings", "kt_settings", 52)
     r = sim.go()
     st = r.get("settings", b"")
     print("no settings block")
-    check(len(st) >= 44 and st[off["from_eeprom"]] == 0 and st[off["cells"]] == 7,
+    check(len(st) >= 52 and st[off["from_eeprom"]] == 0 and st[off["cells"]] == 7,
           "compile time defaults used (7S)", fails)
 
     # ---------------------------------------------------------------- 5: phase current limit
@@ -404,6 +472,70 @@ def main():
     check(len(lv) >= 1 and lv[0] == 3, "assist level code 23 -> level 3 (%s)" % list(lv[:1]), fails)
     check(len(out) >= 6 and out[0] == 0x01 and out[3] == (out[1] + out[2] + 32) & 0xFF and out[4] == out[5],
           "status, speed (with checksum), battery answers: %s" % list(out[:6]), fails)
+
+    print("KingMeter J-LCD / 618U display")
+    f = [0x3A, 0x83, (15 << 3) | 5, 0x00]                  # light + level 3, 25 km/h, 26" (2075 mm)
+    res, out = display_run(ihx, syms, 4, [bytes(f + [xor(f[1:4])])])
+    lv, wh = res.get("lcd", b""), int.from_bytes(res.get("wheel", b"\0\0")[:2], "big")
+    check(len(lv) >= 4 and lv[0] == 3 and lv[3] == 25 and wh == 2075,
+          "level 3, 25 km/h, wheel 2075 mm (%s, %d)" % (list(lv[:4]), wh), fails)
+    a = out.find(b"\x46")
+    check(a >= 0 and len(out) >= a + 8 and xor(out[a + 1:a + 7]) == out[a + 7] and out[a + 3:a + 5] == b"\x0d\xac",
+          "answer 0x46, XOR ok, wheel stopped 0x0DAC: %s" % list(out[a:a + 8]), fails)
+
+    print("UART No.2 display (S866, EN06)")
+    f = [0x01, 0x14, 0, 0, 4, 0, 0, 0x01, 0x04, 0, 0, 0, 32, 0, 0, 0, 0, 0, 0]   # level 4, 26.0", 32 km/h
+    res, out = display_run(ihx, syms, 5, [bytes(f + [xor(f)])])
+    lv, wh = res.get("lcd", b""), int.from_bytes(res.get("wheel", b"\0\0")[:2], "big")
+    check(len(lv) >= 4 and lv[0] == 4 and lv[3] == 32 and wh == 2074,
+          "level 4, 32 km/h, wheel 26.0 inch = 2074 mm (%s, %d)" % (list(lv[:4]), wh), fails)
+    a = out.find(b"\x02\x0e\x01")
+    check(a >= 0 and len(out) >= a + 14 and xor(out[a:a + 13]) == out[a + 13] and out[a + 12] == 0xFF,
+          "answer 14 bytes 02 0E 01, XOR ok: %s" % list(out[a:a + 14]), fails)
+
+    print("Tongsheng display (VLCD5 / VLCD6 / XH18)")
+    f = [0x59, 0x40, 0, 28, 0, 30]                         # level 2, 28", 30 km/h
+    res, out = display_run(ihx, syms, 6, [bytes(f + [sum(f) & 0xFF])])
+    lv, wh = res.get("lcd", b""), int.from_bytes(res.get("wheel", b"\0\0")[:2], "big")
+    check(len(lv) >= 4 and lv[0] == 2 and lv[3] == 30 and wh == 2240,
+          "level 2, 30 km/h, wheel 28 inch = 2240 mm (%s, %d)" % (list(lv[:4]), wh), fails)
+    a = out.find(b"\x43")
+    check(a >= 0 and len(out) >= a + 9 and (sum(out[a:a + 8]) & 0xFF) == out[a + 8] and out[a + 6:a + 8] == b"\x00\x07",
+          "answer 0x43, sum ok, wheel stopped 0x0700: %s" % list(out[a:a + 9]), fails)
+
+    print("VESC UART (115200 baud)")
+    res, out = display_run(ihx, syms, 7, [vesc_packet([0]), vesc_packet([4]),
+                                          vesc_packet([6, 0, 0, 0x13, 0x88])],  # 5000 mA
+                           extra_ms=400, dumps=[("target", "ui16_target_current_10b", 2),
+                                                ("vbat", syms["ui8_adc_battery_voltage_filtered"[:31]], 1)])
+    vb = res.get("vbat", b"\0")[0]     # still settling (1/64 filter every 100 ms): compare with +-3 steps
+    pk = vesc_packets(out)
+    fw_ = [p for p in pk if p[0] == 0]
+    val = [p for p in pk if p[0] == 4]
+    check(len(fw_) == 1 and len(fw_[0]) == 28 and fw_[0][3:11] == b"EBiCS-KT",
+          "COMM_FW_VERSION answer, CRC ok, name EBiCS-KT", fails)
+    check(len(val) == 1 and len(val[0]) == 74, "COMM_GET_VALUES answer, 74 bytes, CRC ok", fails)
+    if val:
+        v = int.from_bytes(val[0][27:29], "big")
+        check(abs(v - vb * 2.72) <= 9, "input voltage in 0.1 V = battery ADC x 0.272 V (%d, ADC %d)" % (v, vb), fails)
+    tg = int.from_bytes(res.get("target", b"\0\0")[:2], "big")
+    check(tg == 40, "COMM_SET_CURRENT 5 A -> target current 40 x 0.125 A (%d)" % tg, fails)
+
+    print("EBiCS app / BLE module (ANT+ LEV pages)")
+    f = [164, 12, 0x4E, 16, 0x2C, 0x08, 4 << 3, 0, 0, 0, 0]   # 2092 mm, level 4
+    res, out = display_run(ihx, syms, 8, [bytes(f + [xor(f)])], extra_ms=400,
+                           dumps=[("vbat", syms["ui8_adc_battery_voltage_filtered"[:31]], 1)])
+    vb = res.get("vbat", b"\0")[0]
+    lv, wh = res.get("lcd", b""), int.from_bytes(res.get("wheel", b"\0\0")[:2], "big")
+    check(len(lv) >= 1 and lv[0] == 4 and wh == 2092, "level 4, wheel 2092 mm (%s, %d)" % (list(lv[:1]), wh), fails)
+    pages = [out[i:i + 12] for i in range(len(out) - 11) if out[i] == 164 and out[i + 1] == 12 and out[i + 2] == 0x4E
+             and xor(out[i:i + 11]) == out[i + 11]]
+    got = sorted(set(p[3] for p in pages))
+    p1 = [p for p in pages if p[3] == 1]   # pages before the app's frame still show level 0
+    check(got == [1, 4] and p1[-1][5] == 4 << 3 and
+          all(abs(p[8] - vb * 1.088) <= 4 for p in pages if p[3] == 4),
+          "pages 1 and 4 in turn, XOR ok, level 4, battery in 0.25 V (%d pages, %s, ADC %d)"
+          % (len(pages), [p[8] for p in pages if p[3] == 4], vb), fails)
 
     # ---------------------------------------------------------------- 7: learned values from the EEPROM
     print("learned hall offsets and back-EMF constant loaded at power on")

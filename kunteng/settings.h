@@ -18,9 +18,11 @@
  *   8  flags (KT_FLAG_*)         24 power ramp: time 0 -> full duty cycle (x0.1 s, 0 = default)
  *   9  PAS magnets               25 FOC current sample delay compensation (int8, x4 us, 0 = off)
  *   10 cadence for full PAS      26 motor characteristic for non-KT displays (KT display P1, 0 = 202)
- *      power (rpm)               27 ... 30 reserved (0)
- *   11 ... 15 assist level       31 checksum: ~(sum of bytes 0 ... 30)
- *      1 ... 5 (percent)
+ *      power (rpm)               27 field weakening: max angle (deg, 0 = off)
+ *   11 ... 15 assist level       28 field weakening: battery current (A, 0 = motor current)
+ *      1 ... 5 (percent)         29 field weakening: phase current peak (A, 0 = 15 A = sensor range)
+ *                                30 field weakening: ramp (deg/s, 0 = 30 deg/s)
+ *                                31 checksum: ~(sum of bytes 0 ... 30)
  * Bytes 23 ... 26 were reserved (0) in the first firmware: 0 means the old behaviour, version stays 1.
  *
  * This file is part of the KT firmware, GPL v3.
@@ -40,6 +42,7 @@
 #define KT_FLAG_OVER_VOLTAGE_PROTECTION 0x04
 #define KT_FLAG_NO_PHASE_CURRENT_LIMIT  0x08
 #define KT_FLAG_NO_HALL_LEARNING        0x10
+#define KT_FLAG_FW_THROTTLE_ONLY        0x20 // field weakening only with the throttle, not with PAS alone
 
 typedef struct
 {
@@ -62,6 +65,10 @@ typedef struct
   uint8_t ui8_ramp_x10;
   int8_t i8_foc_delay_x4us;      // signed: the right sign depends on the hardware
   uint8_t ui8_motor_characteristic;
+  uint8_t ui8_fw_angle_deg;      // field weakening, 0 = off
+  uint8_t ui8_fw_battery_a;
+  uint8_t ui8_fw_phase_a;
+  uint8_t ui8_fw_ramp_dps;
 
   // derived at start up
   uint8_t ui8_adc_battery_voltage_max;
@@ -71,6 +78,10 @@ typedef struct
   uint16_t ui16_pas_max_cadence_ticks; // shortest PAS period accepted (150 rpm)
   uint16_t ui16_pas_min_cadence_ticks; // longer PAS periods mean "not pedalling" (6 rpm)
   uint8_t ui8_phase_current_max; // ADC steps of 0.5 A
+  uint8_t ui8_fw_angle_max;      // /256
+  uint8_t ui8_fw_battery_x2;     // ADC steps of 0.5 A above the zero current offset
+  uint8_t ui8_fw_phase_peak;     // phase B ADC steps (0.121 A)
+  uint16_t ui16_fw_step_x256;    // angle step per 10 ms (1/256 x 256)
   uint8_t ui8_from_eeprom; // 1 when the block was valid
 } struct_kt_settings;
 
