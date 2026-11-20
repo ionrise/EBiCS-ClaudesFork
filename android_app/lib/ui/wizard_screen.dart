@@ -598,6 +598,10 @@ class _CalibrateStepState extends State<_CalibrateStep> {
     final prog = snap['ui8_setup_progress'] ?? 0;
     final halls = snap['ui32_hall_events'];
     switch (state) {
+      case 0 when snap['ui8_setup_cmd'] == 1 && DateTime.now().difference(_t0).inSeconds < 60:
+        // the firmware starts only when the wheel stands still and no throttle / pedals ask for power
+        _set('Waiting for the wheel to stop ...', Tone.busy,
+            'The calibration starts as soon as the wheel stands still. Release throttle and pedals.');
       case 0:
         if (DateTime.now().difference(_t0).inSeconds > 8) {
           _set('The controller did not start the calibration.', Tone.bad,
@@ -608,7 +612,7 @@ class _CalibrateStepState extends State<_CalibrateStep> {
         _set('Starting ...', Tone.busy);
       case 1:
         _set('1/2  Finding the hall sensor positions ...', Tone.busy,
-            'The motor turns slowly and may click or buzz - that is normal. About 6 seconds.');
+            'The motor turns slowly forward and back and may click or buzz - that is normal. About 12 seconds.');
         setState(() => _progress = prog / 100);
       case 2:
         _set('2/2  Measuring the motor speed ...', Tone.busy,

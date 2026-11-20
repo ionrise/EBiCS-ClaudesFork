@@ -216,7 +216,7 @@ class Controller extends ChangeNotifier {
   // ------------------------------------------------------------------ live data / setup mailbox
 
   static const liveVars = <String, String>{
-    'ui32_setup_magic': 'u32', 'ui8_setup_state': 'u8', 'ui8_setup_progress': 'u8', 'ui8_setup_halls_found': 'u8',
+    'ui32_setup_magic': 'u32', 'ui8_setup_state': 'u8', 'ui8_setup_cmd': 'u8', 'ui8_setup_progress': 'u8', 'ui8_setup_halls_found': 'u8',
     'ui8_hall_calibrated': 'u8', 'ui32_hall_events': 'u32', 'ui32_pas_events': 'u32', 'brake_flag': 'u8',
     'ui16_throttle': 'u16', 'ui16_throttle_offset': 'u16', 'uint16_full_rotation_counter': 'u16',
     'i16_hall_order': 'i16', 'ui32_KV': 'i16', 'ui8_watchdog_reset': 'u8', 'ui16_motor_temp_adc': 'u16',
@@ -295,6 +295,10 @@ class Controller extends ChangeNotifier {
         final chip = await _need();
         final s = _syms['ui8_setup_cmd'];
         if (s == null) throw StateError('firmware information missing');
+        // restart first: after riding, stale controller state made the hall autodetect trip the overcurrent
+        // protection on the real motor; right after a restart it worked every time
+        await chip.resetRun();
+        await Future<void>.delayed(const Duration(seconds: 3));
         await chip.st.writeMem8(s.$1, Uint8List.fromList([1]));
       });
 

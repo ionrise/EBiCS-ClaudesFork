@@ -228,6 +228,9 @@ volatile uint8_t ui8_setup_hall_spread = 0;
 // field weakening (runPIcontrol): negative Id setpoint (internal current units, live data), its ramp state,
 // the ramp step per FOC cycle, the voltage the current controllers ask for (before the limit, low pass x16)
 volatile int32_t i32_fw_id = 0;
+// voltage and hall interval when the PWM was switched off for coasting (0 A for 100 ms: u_q = back-EMF at that speed)
+static int32_t i32_uq_coast = 0;
+static uint32_t ui32_tics_coast = 0;
 static int32_t i32_fw_id16 = 0;
 static int32_t i32_fw_step16 = 0;
 static int32_t i32_fw_u_start = 0;
@@ -284,6 +287,9 @@ volatile uint8_t ui8_oc_trips = 0;            // number of trips since power on 
 volatile uint8_t ui8_stall_limited = 0;       // 1 = current limited because the motor does not turn
 int16_t i16_oc_limit = 1950;                  // phase current trip level in ADC counts
 static uint8_t ui8_oc_count = 0;
+// overcurrent trip capture for live data: u_q, u_d, phase 1, phase 2, CCR1..3, PWM cycles since switch-on, setup state
+volatile int16_t i16_oc_capture[9];
+static uint16_t ui16_moe_cycles = 0;
 int32_t i32_ramp_step16 = 0;                  // current ramp: setpoint step per FOC cycle <<16, 0 = no ramp
 int32_t i32_iq_ramped16 = 0;                  // ramped phase current setpoint <<16
 volatile uint8_t ui8_kv_valid = 0;            // 1 = motor constant KV measured (EEPROM or KV detect), needed for coasting
@@ -629,6 +635,12 @@ int main(void)
 	ADC2->JOFR1 = ui16_ph2_offset;
 #endif
 
+	//phase current reading state 1 (A and B directly, as the injected channels are set up). It was 0 until the first FOC
+	//run: state 0 doesn't update the phase currents, they kept the raw ADC values (~2048) of the offset measurement and
+	//the first switch-on after power up tripped the overcurrent protection at once (real motor)
+	MS.char_dyn_adc_state = 1;
+	i16_ph1_current = 0;
+	i16_ph2_current = 0;
 	ui8_adc_offset_done_flag=1;
 	init_watchdog();
 
@@ -768,9 +780,15 @@ int main(void)
 		HAL_IWDG_Refresh(&hiwdg);
 
 		//setup app requested hall + KV autodetect over SWD (only while the motor is switched off)
-		if(ui8_setup_cmd==1){
+		//The command stays pending until the motor stands still (no hall edge for ~1 s) and no current is asked for: an
+		//autodetect started while the wheel still turned (a geared hub coasts ~10 s without load) let the current
+		//controller wind up against the spinning rotor and tripped the overcurrent protection. Before, the command was
+		//also dropped when the PWM was on (0 A after a failed calibration): every retry was ignored until power off.
+		if(ui8_setup_cmd==1 && SystemState == Stop && !MS.i_q_setpoint && !ui8_overcurrent){
 			ui8_setup_cmd=0;
-			if(!READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)) autodetect();
+			CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+			HAL_Delay(2); //a few PWM cycles: the interrupt resets the controllers and the voltage while the PWM is off
+			autodetect();
 		}
 
 
@@ -1051,6 +1069,12 @@ int main(void)
 			if(!brake_flag && int32_temp_current_target>0){
 				int32_temp_current_target=map(MS.Voltage*CAL_V, RS.battery_voltage_min, RS.battery_voltage_min+RS.voltage_ramp_mv, 0, int32_temp_current_target);
 			}
+#ifndef SENSORLESS
+			//KV detect: its current replaces throttle / PAS here, before MS.i_q_setpoint is written. It used to be written
+			//later in the loop, so MS.i_q_setpoint was 0 for a moment in every loop pass; the current ramp in runPIcontrol
+			//drops to 0 at once on a 0 setpoint, so the KV current never built up and the motor only crept (real motor).
+			if(ui8_KV_detect_flag) int32_temp_current_target = ui8_KV_detect_flag;
+#endif
 			MS.i_q_setpoint=map(MS.Temperature, RS.motor_temp_threshold,RS.motor_temp_max,int32_temp_current_target,0); //ramp down power with temperature to avoid overheating the motor
 #if(INT_TEMP_25)
 			MS.i_q_setpoint=map(MS.int_Temperature, CONTROLLER_TEMPERATURE_THRESHOLD,CONTROLLER_TEMPERATURE_MAX,MS.i_q_setpoint,0); //ramp down power with processor temperatur to avoid overheating the controller
@@ -1092,7 +1116,6 @@ int main(void)
 #ifndef SENSORLESS //KV detect is started by the hall calibration only
 			//auto KV detect
 			if(ui8_KV_detect_flag){
-				MS.i_q_setpoint=ui8_KV_detect_flag;
 				if(ui16_KV_detect_counter>32){
 					ui8_KV_detect_flag++;
 					ui16_KV_detect_counter=0;
@@ -1127,6 +1150,8 @@ int main(void)
 				if(MS.i_q_setpoint || brake_flag || ui8_KV_detect_flag || !MS.hall_angle_detect_flag || !ui8_kv_valid || i32_fw_id) ui32_no_current_since = HAL_GetTick(); //not while field weakening: PWM off above the base speed = uncontrolled diode regen
 				else if(READ_BIT(TIM1->BDTR, TIM_BDTR_MOE) && (HAL_GetTick() - ui32_no_current_since) > 100){
 					CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+					i32_uq_coast = MS.u_q;                   //back-EMF voltage at this speed, for switching on again
+					ui32_tics_coast = uint32_tics_filtered>>3;
 					TIM1->CCR1 = 1023;
 					TIM1->CCR2 = 1023;
 					TIM1->CCR3 = 1023;
@@ -1146,16 +1171,49 @@ int main(void)
 				TIM1->CCR1 = 1023; //set initial PWM values
 				TIM1->CCR2 = 1023;
 				TIM1->CCR3 = 1023;
-				SET_BIT(TIM1->BDTR, TIM_BDTR_MOE);
-				if(SystemState == Stop)speed_PLL(0,0,0);//reset integral part
+				//the PWM is switched on only after the controllers have their start values (below), with the interrupt held
+				//off: it resets the controllers while the PWM is off and would wipe the start values in between
+				__disable_irq();
+				if(SystemState == Stop){
+					speed_PLL(0,0,0);//reset the speed PLL
+					//start the current controllers from 0. While the PWM is off PI_control() doesn't run, so its own reset
+					//never happened: after coasting off at full speed the integral still held the full speed voltage and the
+					//next start from standstill put ~1700 of 2000 on a stopped motor -> overcurrent trip, 3 trips = off until
+					//power cycle (found on the real motor: release at speed, stop, throttle again)
+					PI_iq.integral_part = 0; PI_iq.out = 0;
+					MS.u_q = 0; MS.u_d = 0;
+				}
+				else if (ui32_tics_coast && ui16_timertics) {
+					//the hall interval now is at least the time since the last hall edge (the motor slows down while
+					//coasting, the last measured interval is too short until the next edge comes)
+					uint32_t ui32_tics_now = __HAL_TIM_GET_COUNTER(&htim2);
+					if (ui32_tics_now < ui16_timertics) ui32_tics_now = ui16_timertics;
+					//switching on while the motor still turns after coasting: start at the voltage it had at 0 A when the
+					//PWM went off, scaled with the speed (hall interval then / now). Needs no KV. The KV based start value
+					//was ~20 % off and tripped the overcurrent protection about every second time on the real motor.
+					int32_t i32_u = (i32_uq_coast * (int32_t)(ui32_tics_coast > 65535 ? 65535 : ui32_tics_coast)) / (int32_t)ui32_tics_now; //|u_q| <= 2000: fits 32 bit (64 bit division costs ~1 KB)
+					if (i32_u > _U_MAX) i32_u = _U_MAX;
+					if (i32_u < -_U_MAX) i32_u = -_U_MAX;
+					PI_iq.integral_part = i32_u << PI_iq.shift;
+					PI_iq.out = PI_iq.integral_part;
+					MS.u_q = i32_u; MS.u_d = 0;
+				}
 				else {
 					PI_iq.integral_part = ((((uint32_SPEEDx100_cumulated*_T))/(MS.Voltage*ui32_KV))<<4)<<PI_iq.shift;
 					PI_iq.out=PI_iq.integral_part;
 				}
-				__HAL_TIM_SET_COUNTER(&htim2,0); //reset tim2 counter
-				ui16_timertics=20000; //set interval between two hallevents to a large value
+				ui32_tics_coast = 0;
+				ui8_oc_count = 0;
+				SET_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+				__enable_irq();
 				i8_recent_rotor_direction=i8_direction*i8_reverse_flag*sign(MS.i_q_setpoint);
-				get_standstill_position();
+				if(SystemState == Stop){
+					__HAL_TIM_SET_COUNTER(&htim2,0); //reset tim2 counter
+					ui16_timertics=20000; //set interval between two hallevents to a large value
+					get_standstill_position();
+				}
+				//still turning: keep the measured hall timing and angle. Resetting them (timer 0, interval 20000, sector
+				//angle after a 100 ms wait) threw the angle up to 60 deg off right when the voltage is switched on at speed
 #ifdef SENSORLESS
 				sensorless_reset();
 #endif
@@ -1969,6 +2027,10 @@ int main(void)
 				if (i16_a > i16_oc_limit && READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)) {
 					if (++ui8_oc_count >= 4) {
 						CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+						i16_oc_capture[0] = MS.u_q; i16_oc_capture[1] = MS.u_d;
+						i16_oc_capture[2] = i16_ph1_current; i16_oc_capture[3] = i16_ph2_current;
+						i16_oc_capture[4] = TIM1->CCR1; i16_oc_capture[5] = TIM1->CCR2; i16_oc_capture[6] = TIM1->CCR3;
+						i16_oc_capture[7] = ui16_moe_cycles; i16_oc_capture[8] = ui8_setup_state;
 						ui8_overcurrent = 1;
 						if (ui8_oc_trips < 255) ui8_oc_trips++;
 						ui8_oc_count = 0;
@@ -2044,7 +2106,20 @@ int main(void)
 				FOC_calculation(i16_ph1_current, i16_ph2_current, q31_rotorposition_absolute, (((int16_t)i8_direction*i8_reverse_flag)*MS.i_q_setpoint), &MS);
 #endif
 			}
-			else { i32_fw_id16 = 0; i32_fw_id = 0; i32_u_demand16 = 0; } //PWM off: no stale field weakening at the next switch-on
+			if (READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)) { if (ui16_moe_cycles < 65535) ui16_moe_cycles++; }
+			else {
+				ui16_moe_cycles = 0;
+				//PWM off: nothing stale at the next switch-on (field weakening, current controllers). PI_control() resets
+				//itself only when it runs, and it doesn't run while the PWM is off: after coasting off at full speed the
+				//next start (throttle or hall autodetect) put the old full speed voltage on a stopped motor -> overcurrent
+				i32_fw_id16 = 0; i32_fw_id = 0; i32_u_demand16 = 0;
+				PI_iq.integral_part = 0; PI_iq.out = 0;
+				PI_id.integral_part = 0; PI_id.out = 0;
+				//zero voltage vector: the compare registers below are written every cycle, they kept the last pattern
+				//(full speed voltage after coasting off) and the next switch-on put it on the stopped motor
+				MS.u_q = 0; MS.u_d = 0;
+				switchtime[0] = 1023; switchtime[1] = 1023; switchtime[2] = 1023;
+			}
 			//temp5=__HAL_TIM_GET_COUNTER(&htim1);
 			//set PWM
 

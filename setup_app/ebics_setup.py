@@ -1438,7 +1438,11 @@ class WizardPage(Page):
                 self.cal["lost_box"] = None
             state, prog = snap.get("ui8_setup_state"), snap.get("ui8_setup_progress") or 0
             halls = snap.get("ui32_hall_events")
-            if state == 0:
+            if state == 0 and snap.get("ui8_setup_cmd") == 1 and time.time() - self.cal["t0"] < 60:
+                # the firmware starts only when the wheel stands still and no throttle / pedals ask for power
+                st.configure(text="Waiting for the wheel to stop ...", foreground=WARN)
+                detail.configure(text="The calibration starts as soon as the wheel stands still. Release throttle and pedals.")
+            elif state == 0:
                 if time.time() - self.cal["t0"] > 8:
                     st.configure(text="The controller did not start the calibration (or it restarted).", foreground=BAD)
                     detail.configure(text="Is the motor running (throttle/pedals)? Release everything and try again. "
@@ -1450,7 +1454,7 @@ class WizardPage(Page):
                 st.configure(text="Starting ...", foreground=MUTED)
             elif state == 1:
                 st.configure(text="1/2  Finding the hall sensor positions ...", foreground=ACCENT)
-                detail.configure(text="The motor turns slowly and may click or buzz - that is normal. About 6 seconds.")
+                detail.configure(text="The motor turns slowly forward and back and may click or buzz - that is normal. About 12 seconds.")
                 bar["value"] = prog
             elif state == 2:
                 st.configure(text="2/2  Measuring the motor speed ...", foreground=ACCENT)

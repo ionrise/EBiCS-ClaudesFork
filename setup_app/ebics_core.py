@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import threading
+import time
 import zipfile
 from pathlib import Path
 
@@ -693,6 +694,11 @@ class StLink:
             return None
         return mem
 
+    def reset(self):
+        """Restarts the controller (fresh state: the calibration was found to work reliably only after a restart)."""
+        rc, out = self._cube(["-c", "port=SWD", "mode=HOTPLUG", "-rst"], timeout=30)
+        return rc == 0
+
     def write8(self, addr, value):
         rc, out = self._cube(["-c", "port=SWD", "mode=HOTPLUG", self.LIVE_FREQ, "-w8", hex(addr), hex(value)], timeout=30)
         return rc == 0 and "Error" not in out
@@ -706,6 +712,7 @@ LIVE_VARS = {
     # name: (type, offset inside the symbol, label)
     "ui32_setup_magic": ("u32", 0),
     "ui8_setup_state": ("u8", 0),
+    "ui8_setup_cmd": ("u8", 0),
     "ui8_setup_progress": ("u8", 0),
     "ui8_setup_halls_found": ("u8", 0),
     "ui8_setup_hall_spread": ("u8", 0),
@@ -726,6 +733,7 @@ LIVE_VARS = {
     "ui8_motor_temp_sensor_ok": ("u8", 0),
     "ui8_sensorless_running": ("u8", 0),
     "i32_fw_id": ("i32", 0),
+    "i16_oc_capture": ("i16", 0),
 }
 MS_FIELDS = {"Voltage": ("i32", 0), "Speed": ("u32", 4), "i_q": ("i32", 12), "i_q_setpoint": ("i32", 16),
              "u_abs": ("i32", 44), "Battery_Current": ("i32", 48), "assist_level": ("u8", 54),
@@ -793,7 +801,22 @@ class Live:
     def start_calibration(self):
         if "ui8_setup_cmd" not in self.syms:
             return False
-        return self.st.write8(self.syms["ui8_setup_cmd"][0], 1)
+        # restart first: after riding, stale controller state made the hall autodetect trip the overcurrent
+        # protection on the real motor; right after a restart it worked every time
+        self.st.reset()
+        time.sleep(3)
+        if self.st.write8(self.syms["ui8_setup_cmd"][0], 1):
+            return True
+        # The firmware takes the command and clears it at once, so STM32CubeProgrammer's read-back check reports
+        # "Downloading 8-bit data failed" although the write worked (seen on the real controller: the motor turned
+        # while the app said "could not start"). Decide by what the controller does instead.
+        for _ in range(6):
+            time.sleep(0.4)
+            snap = self.snapshot()
+            # started, or pending: the firmware waits until the wheel stands still before it starts
+            if snap and ((snap.get("ui8_setup_state") or 0) != 0 or snap.get("ui8_setup_cmd") == 1):
+                return True
+        return False
 
 
 def speed_kmh(snap, settings):
