@@ -166,6 +166,31 @@ class Controller extends ChangeNotifier {
         return v;
       });
 
+  /// Installs the measuring firmware of the sensorless setup (with these settings for the currents).
+  Future<FirmwareVariant> installMeasuring(BikeSettings s, void Function(String step, double progress) progress) =>
+      _locked(() async {
+        final chip = await _need();
+        final v = await repo.paramIdVariant();
+        if (v == null) throw StateError('this app has no measuring firmware');
+        if (await chip.readProtected()) {
+          throw StLinkException('the chip is still locked - unlock it first and switch the controller off and on');
+        }
+        await chip.writeImage(await repo.image(v, s), progress: progress);
+        progress('Starting the firmware', 1);
+        await chip.resetRun();
+        installed = v;
+        _syms = await repo.symbols(v);
+        return v;
+      });
+
+  /// Starts the motor measurement of the measuring firmware (ui8_setup_cmd = 2).
+  Future<void> startMeasuring() => _locked(() async {
+        final chip = await _need();
+        final s = _syms['ui8_setup_cmd'];
+        if (s == null) throw StateError('firmware information missing');
+        await chip.st.writeMem8(s.$1, Uint8List.fromList([2]));
+      });
+
   /// Writes only the settings block (page 29) and restarts the controller. The firmware must be one
   /// of the app's variants (checked by [identify]).
   Future<void> updateSettings(BikeSettings s) => _locked(() async {
@@ -222,6 +247,9 @@ class Controller extends ChangeNotifier {
     'i16_hall_order': 'i16', 'ui32_KV': 'i16', 'ui8_watchdog_reset': 'u8', 'ui16_motor_temp_adc': 'u16',
     'ui8_sensorless_running': 'u8', 'ui8_settings_source': 'u8', 'ui8_motor_temp_sensor_ok': 'u8',
     'ui8_setup_hall_spread': 'u8', 'i32_fw_id': 'i32', 'ui8_phase_fault': 'u8',
+    // motor measurement (only in the measuring firmware, pid_measure in Src/main.c)
+    'ui8_pid_state': 'u8', 'ui8_pid_progress': 'u8', 'i32_pid_r_mohm': 'i32', 'i32_pid_l_uh': 'i32',
+    'i32_pid_flux_uwb': 'i32', 'i32_pid_obs_r': 'i32', 'i32_pid_obs_l': 'i32', 'i32_pid_obs_flux': 'i32',
   };
 
   /// Autodetect forward / backward readings, same order as [halls].

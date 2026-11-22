@@ -10,12 +10,14 @@ import 'settings_block.dart';
 class FirmwareVariant {
   final String name, display, displayLabel, file, symbolsFile, sha256;
   final bool sensorless;
+  final bool paramId; // the temporary measuring firmware of the sensorless setup
   final int size;
   FirmwareVariant.fromJson(Map<String, dynamic> j)
       : name = j['name'] as String,
         display = j['display'] as String,
         displayLabel = j['display_label'] as String? ?? j['display'] as String,
         sensorless = j['sensorless'] == true,
+        paramId = j['param_id'] == true,
         file = j['file'] as String,
         symbolsFile = j['symbols'] as String,
         size = j['size'] as int,
@@ -54,7 +56,16 @@ class FirmwareRepo {
 
   Future<FirmwareVariant?> variantFor(BikeSettings s) async {
     for (final v in await variants()) {
+      if (v.paramId) continue;
       if (v.display == s.displayType.key && v.sensorless == s.sensorless) return v; // unknown (removed) display -> first
+    }
+    return null;
+  }
+
+  /// The measuring firmware of the sensorless setup (resistance, inductance, flux linkage), null if not bundled.
+  Future<FirmwareVariant?> paramIdVariant() async {
+    for (final v in await variants()) {
+      if (v.paramId) return v;
     }
     return null;
   }

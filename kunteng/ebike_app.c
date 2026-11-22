@@ -41,7 +41,7 @@ uint8_t ui8_adc_throttle_value_cruise_control;
 uint8_t ui8_throttle_value;
 uint16_t ui16_throttle_value_accumulated = 0;
 uint8_t ui8_throttle_value_filtered;
-uint8_t ui8_is_throotle_released;
+uint8_t ui8_is_throotle_released = 1; // released until the first reading (was 0: "pressed" right after power up)
 uint8_t ui8_throttle_error_counter = 0;
 
 volatile uint16_t ui16_pas_pwm_cycles_ticks = 0xffff; // "not pedalling" until the first PAS pulses

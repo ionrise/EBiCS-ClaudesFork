@@ -1407,11 +1407,7 @@ class WizardPage(Page):
     def s_calibrate(self):
         self.head.configure(text="Motor calibration")
         if self.app.settings.get("sensorless"):
-            self.text("Sensorless motor: there are no hall sensors to calibrate.")
-            self.bullets(["Check the motor parameters in Settings > Expert > 'Sensorless' (inductance, resistance, "
-                          "flux linkage, gain, angle offset). The defaults are from the EBiCS Sensorless_VESC branch.",
-                          "The motor starts with a short open loop spin before the observer takes over.",
-                          "Sensorless is experimental: test with the wheel lifted, low current first."])
+            self.s_measure_motor()
             return
         self.text("The controller now finds the position of the motor's hall sensors and measures the motor. "
                   + WARN_FIRST_BACK)
@@ -1454,6 +1450,61 @@ class WizardPage(Page):
             self.app.bg(kick, started)
         btn = ttk.Button(self.body, text="Start calibration", style="Accent.TButton", command=start)
         btn.pack(anchor="w", pady=10)
+
+    def s_measure_motor(self):
+        """Sensorless: a measuring firmware finds resistance, inductance and flux linkage, they go into the settings,
+        then the normal firmware is installed again."""
+        s = self.app.settings
+        self.text("Sensorless motor: the controller needs the motor's resistance, inductance and flux linkage. "
+                  "A measuring firmware is installed for a minute, measures them, and then your normal firmware "
+                  "is installed again with the measured values.")
+        self.text("Now: resistance %s, inductance %s, flux linkage %s (observer units, Settings > Expert)." %
+                  (s.get("resistance"), s.get("inductance"), s.get("flux_linkage")), style="Muted.TLabel")
+        ok_var = tk.BooleanVar()
+        ttk.Checkbutton(self.body, text="The wheel is lifted and spins freely, the brake is released, hands and "
+                                        "cables are away from the wheel", variable=ok_var).pack(anchor="w", padx=10, pady=4)
+        st = self.status()
+        bar = ttk.Progressbar(self.body, mode="indeterminate", length=px(500))
+        bar.pack(anchor="w")
+        log = LogBox(self.body, height=10)
+        log.pack(fill="both", expand=True, pady=8)
+
+        def ui_log(line):
+            self.app.ui(lambda: log.add(line))
+
+        def job():
+            res = core.measure_motor(self.app.settings, self.app.stlink, self.app.live, ui_log)
+            if not isinstance(res, dict):
+                ui_log("--- installing the normal firmware again ---")
+                build_and_flash(self.app, ui_log)
+                return res
+            core.apply_motor_params(self.app.settings, res)
+            self.app.save()
+            ui_log("--- installing the normal firmware with the measured values ---")
+            return res if build_and_flash(self.app, ui_log) else "the measured values are saved, but installing failed"
+
+        def done(res):
+            bar.stop()
+            btn.state(["!disabled"])
+            if isinstance(res, dict):
+                st.configure(text="✔  Measured: %d mOhm, %d uH, %.2f mWb - saved and installed." %
+                             (res["i32_pid_r_mohm"], res["i32_pid_l_uh"], res["i32_pid_flux_uwb"] / 1000.0),
+                             foreground=OK)
+                self.block(False)
+            else:
+                st.configure(text="✖  " + str(res), foreground=BAD)
+
+        def start():
+            if not ok_var.get():
+                messagebox.showinfo("Measure the motor", "Please confirm the safety point first.")
+                return
+            btn.state(["disabled"])
+            bar.start(12)
+            st.configure(text="Working ... (about 2 minutes)", foreground=MUTED)
+            self.app.bg(job, done)
+        btn = ttk.Button(self.body, text="Measure the motor", style="Accent.TButton", command=start)
+        btn.pack(anchor="w", pady=6)
+        ttk.Label(self.body, text="You can skip this step and keep the values in Settings.", style="Muted.TLabel").pack(anchor="w")
 
     def poll_calibration(self, st, bar, detail, btn):
         if not self.polling:

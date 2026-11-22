@@ -405,9 +405,13 @@ uint8_t ui8_over_current_retries = 0;
 uint8_t ui8_hall_invalid_counter = 0;
 uint8_t ui8_coasting = 0;              // geared motor, no current requested: PWM off, motor spins freely
 // startup melody (motor_melody): tone frequency step and phase, voltage axis, phase test result
-static uint16_t ui16_tone_step = 0;
+static volatile uint16_t ui16_tone_step = 0;
 static uint16_t ui16_tone_phase = 0;
 static uint8_t ui8_tone_axis = 0;
+static volatile uint8_t ui8_tone_stop = 0;   // end the note at the next current zero crossing
+static uint8_t ui8_pas_raw = 0;              // PAS filter: last read, how often in a row, good periods
+static uint8_t ui8_pas_raw_count = 0;
+static uint8_t ui8_pas_good_periods = 0;
 volatile uint8_t ui8_phase_fault = 0;  // bit 0..2: no phase B current on axis A, B, C (open phase): motor stays off
 uint8_t ui8_coast_counter = 0;
 // back-EMF constant: duty cycle per erps (x256), learned whenever the current is ~0 A. Used to restart a
@@ -698,7 +702,17 @@ hall_done:
   if (ui8_ad_active) { ui8_sinewave_table_index = ui8_ad_index; } // autodetect: the field is turned by hand
   if (ui16_tone_step) // startup melody: the voltage vector flips between the axis and the opposite side
   {
+    uint16_t ui16_old = ui16_tone_phase;
     ui16_tone_phase += ui16_tone_step;
+    // end of a note: stop where the current crosses 0 (phase 0x4000 / 0xC000, the tone starts at 0x4000).
+    // Stopping anywhere left up to the peak current in the windings, decaying as a DC current along the axis:
+    // a kick towards the axis at every note, and with the axis moving 120 deg per note the rotor turned (real motor)
+    if (ui8_tone_stop && (((uint16_t) (ui16_old - 0x4000) ^ (uint16_t) (ui16_tone_phase - 0x4000)) & 0x8000))
+    {
+      ui16_tone_step = 0;
+      ui16_ad_duty = 0;
+      ui8_tone_stop = 0;
+    }
     ui8_sinewave_table_index = ui8_tone_axis + ((ui16_tone_phase & 0x8000) ? 128 : 0);
   }
 
@@ -777,14 +791,16 @@ hall_done:
     if (ui16_duty_cycle > 0) { ui16_duty_cycle--; }
   }
   // regen while the battery is full: reduce regen current
-  else if (((uint8_t) (ui8_adc_motor_total_current + 1) < ui8_motor_total_current_offset) &&
+  // Both regen branches raise the duty cycle: only while the motor turns (it brakes). On a standing motor that
+  // drove it - after the startup melody the motor (alone on the table) ran ~20 turns by itself (real motor).
+  else if (ui16_motor_speed_erps && ((uint8_t) (ui8_adc_motor_total_current + 1) < ui8_motor_total_current_offset) &&
            (UI8_ADC_BATTERY_VOLTAGE >= kt_settings.ui8_adc_battery_voltage_max))
   {
     if (ui16_duty_cycle < PWM_DUTY_MAX) { ui16_duty_cycle++; }
   }
   // regen current limit. One ADC step below the offset is noise: with regen 0 A it raised the duty cycle and the
   // motor kept turning without throttle (real KT controller)
-  else if ((uint8_t) (ui8_adc_motor_total_current + 1) < ui8_adc_target_motor_regen_current_max)
+  else if (ui16_motor_speed_erps && ((uint8_t) (ui8_adc_motor_total_current + 1) < ui8_adc_target_motor_regen_current_max))
   {
     if (ui16_duty_cycle < PWM_DUTY_MAX) { ui16_duty_cycle++; }
   }
@@ -832,25 +848,26 @@ hall_done:
 
   /****************************************************************************/
   // PAS timing between positive pulses and on/off time of each pulse, in PWM cycles
+  // The PAS input picks up the motor's switching noise when no sensor is connected (or a long cable): every glitch
+  // was a pulse, a glitch faster than the max cadence counted as the max cadence = full assist, and the motor ran
+  // by itself (real controller, motor on the table: ~20 turns after power up). Now: the input state is taken after
+  // 3 equal reads (192 us), periods faster than the max cadence are noise, and assist starts after 2 good periods.
   ui16_pas_counter++;
-  if ((PAS__PORT->IDR & PAS__PIN) == 0)
-  {
-    ui8_pas_state = 0;
-    ui16_pas_off_time_counter++;
-  }
-  else
-  {
-    ui8_pas_state = 1;
-    ui16_pas_on_time_counter++;
-  }
+  ui8_temp = ((PAS__PORT->IDR & PAS__PIN) == 0) ? 0 : 1;
+  if (ui8_temp == ui8_pas_raw) { if (ui8_pas_raw_count < 255) { ui8_pas_raw_count++; } }
+  else { ui8_pas_raw = ui8_temp; ui8_pas_raw_count = 1; }
+  if (ui8_pas_raw_count >= 3) { ui8_pas_state = ui8_pas_raw; }
+  if (ui8_pas_state == 0) { ui16_pas_off_time_counter++; }
+  else { ui16_pas_on_time_counter++; }
 
   if (ui8_pas_state != ui8_pas_state_old)
   {
     ui8_pas_state_old = ui8_pas_state;
     if (ui8_pas_state == 1) // 0 -> 1 transition
     {
-      if (ui16_pas_counter < kt_settings.ui16_pas_max_cadence_ticks) { ui16_pas_counter = kt_settings.ui16_pas_max_cadence_ticks; }
-      ui16_pas_pwm_cycles_ticks = ui16_pas_counter;
+      if (ui16_pas_counter < kt_settings.ui16_pas_max_cadence_ticks) { ui8_pas_good_periods = 0; } // noise
+      else if (ui8_pas_good_periods < 2) { ui8_pas_good_periods++; }
+      else { ui16_pas_pwm_cycles_ticks = ui16_pas_counter; }
       ui16_pas_counter = 0;
     }
     else
@@ -866,6 +883,7 @@ hall_done:
   // limit min PAS cadence
   if (ui16_pas_counter > kt_settings.ui16_pas_min_cadence_ticks)
   {
+    ui8_pas_good_periods = 0;
     ui16_pas_pwm_cycles_ticks = kt_settings.ui16_pas_min_cadence_ticks;
     ui16_pas_counter = 0;
     ui16_pas_on_time_counter = 0;
@@ -1699,8 +1717,8 @@ void motor_melody (void)
   uint8_t ui8_peak;
   uint8_t ui8_max;
   uint8_t ui8_tgt;
-  uint8_t ui8_halls = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
-  uint8_t ui8_hall_changes = 0;
+  uint8_t ui8_halls;
+  int8_t i8_hall_moved = 0;
   uint16_t ui16_duty = 8;
   uint16_t ui16_f;
   uint16_t ui16_f_old = 0;
@@ -1712,8 +1730,13 @@ void motor_melody (void)
   return; // ucsim has no motor current: the phase test would block the motor in the tests
 #endif
   if (settings_flag (KT_FLAG_NO_MELODY) || (ui8_motor_controller_state != MOTOR_CONTROLLER_STATE_OK)) { return; }
-  if (ui16_target > 30) { ui16_target = 30; }   // ~3.6 A: torque ripple (the rotor must not move)
-  if (ui16_target < 12) { ui16_target = 12; }   // ~1.5 A: enough for the phase test
+  ui16_target >>= 1;                            // half: loud enough (users found the full level too loud)
+  if (ui16_target > 15) { ui16_target = 15; }   // ~1.8 A: torque ripple (the rotor must not move)
+  if (ui16_target < 6) { ui16_target = 6; }     // ~0.7 A: enough for the phase test
+  // the filtered hall state of the PWM interrupt (raw reads see noise); it needs a few cycles after power up
+  ui16_start = TIM2_GetCounter ();
+  while ((uint16_t) (TIM2_GetCounter () - ui16_start) < 24) { ; } // 3 ms
+  ui8_halls = ui8_hall_sensors_last;
   ui8_coasting = 0;
   ui16_ad_duty = 0;
   ui8_ad_active = 1;
@@ -1740,7 +1763,7 @@ void motor_melody (void)
     }
     for (ui8_t = 0; ui8_t < ui8_melody[ui8_n][1]; ui8_t++)
     {
-      if (ui16_duty > 150) { ui16_duty = 150; }
+      if (ui16_duty > 75) { ui16_duty = 75; }
       ui16_ad_duty = ui16_f ? ui16_duty : 0;
       ui16_start = TIM2_GetCounter ();
       while ((uint16_t) (TIM2_GetCounter () - ui16_start) < 39) { ; } // 5 ms
@@ -1752,12 +1775,19 @@ void motor_melody (void)
         if (ui8_peak < ui8_tgt) { ui16_duty += (ui16_duty >> 3) + 1; }
         else { ui16_duty -= ui16_duty >> 3; }
       }
-      // wheel turned: a second hall change (one change can be the rotor twitching at a hall edge)
+      // wheel turned: net movement of 2 hall sectors. The rotor can sit at a hall edge and twitch across it back
+      // and forth with the tone (real motor): forward edges count +1, backward edges -1.
       {
-        uint8_t ui8_h = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
-        if (ui8_h != ui8_halls) { ui8_halls = ui8_h; ui8_hall_changes++; }
+        uint8_t ui8_h = ui8_hall_sensors_last;   // filtered: the tone current puts glitches on the hall wires
+        if ((ui8_h != ui8_halls) && (ui8_h >= 1) && (ui8_h <= 6) && (ui8_halls >= 1) && (ui8_halls <= 6))
+        {
+          if (ui8_hall_next_state[ui8_halls] == ui8_h) { i8_hall_moved++; }
+          else if (ui8_hall_next_state[ui8_h] == ui8_halls) { i8_hall_moved--; }
+        }
+        ui8_halls = ui8_h;
       }
-      if (brake_is_set () || (ui8_motor_controller_state != MOTOR_CONTROLLER_STATE_OK) || (ui8_hall_changes > 1))
+      if (brake_is_set () || (ui8_motor_controller_state != MOTOR_CONTROLLER_STATE_OK) ||
+          (i8_hall_moved > 1) || (i8_hall_moved < -1))
       {
         ui8_faults = 0;
         goto end;
@@ -1765,7 +1795,14 @@ void motor_melody (void)
     }
     if (ui16_f)
     {
-      if (ui8_max < 4) { ui8_faults |= (uint8_t) (1 << ui8_axis); } // < 0.5 A: open phase / dead MOSFET
+      // end the note at a current zero crossing (the interrupt clears ui16_tone_step), at most ~4 ms
+      ui8_tone_stop = 1;
+      ui16_start = TIM2_GetCounter ();
+      while (ui16_tone_step && ((uint16_t) (TIM2_GetCounter () - ui16_start) < 32)) { ; }
+      ui16_tone_step = 0;
+      ui16_ad_duty = 0;
+      ui8_tone_stop = 0;
+      if (ui8_max < 2) { ui8_faults |= (uint8_t) (1 << ui8_axis); } // < 0.25 A: open phase / dead MOSFET
       if (++ui8_axis > 2) { ui8_axis = 0; }
     }
   }
@@ -1776,7 +1813,10 @@ end:
   ui16_duty_cycle = 0;
   ui16_duty_cycle_target = 0;
   ui8_phase_fault = ui8_faults;
-  if (ui8_faults) { TIM1->BKR &= (uint8_t) ~TIM1_BKR_MOE; }
+  // start with the PWM off (coasting) until power is wanted, the current controller from 0
+  i16_current_pi_fraction = 0;
+  ui8_coasting = 1;
+  TIM1->BKR &= (uint8_t) ~TIM1_BKR_MOE;
 }
 
 /****************************************************************************/

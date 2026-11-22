@@ -445,6 +445,8 @@ def generate_config_h(s):
     d("FW_CURRENT_MAX", units(s.get("fw_current_a", 0) or 0)); d("FW_BATTERY_CURRENT_MAX", ma(s.get("fw_battery_a", 0) or 0))
     d("FW_RAMP_MS", max(1, min(10000, int(s.get("fw_ramp_ms", 500))))); d("FW_VOLTAGE_PCT", max(50, min(98, int(s.get("fw_voltage_pct", 90) or 90))))
     d("MELODY_PCT", max(0, min(100, int(s.get("melody_pct", 50)))))
+    if s.get("param_id"):   # temporary firmware that measures the motor parameters (sensorless setup)
+        L.append("#define PARAM_ID")
     d("BATTERYVOLTAGE_MIN", cutoff); d("BATTERYVOLTAGE_MAX", vmax)
     d("VOLTAGE_RAMP_MV", max(100, int(float(s.get("voltage_ramp_v", 1.0)) * 1000)))
     d("MOTOR_TEMPERATURE_THRESHOLD", int(s.get("motor_temp_derate", 100)))
@@ -757,6 +759,10 @@ LIVE_VARS = {
     "ui8_sensorless_running": ("u8", 0),
     "i32_fw_id": ("i32", 0),
     "ui8_phase_fault": ("u8", 0),
+    # motor parameter identification (only in the temporary measuring firmware, see pid_measure in Src/main.c)
+    "ui8_pid_state": ("u8", 0), "ui8_pid_progress": ("u8", 0),
+    "i32_pid_r_mohm": ("i32", 0), "i32_pid_l_uh": ("i32", 0), "i32_pid_flux_uwb": ("i32", 0),
+    "i32_pid_obs_r": ("i32", 0), "i32_pid_obs_l": ("i32", 0), "i32_pid_obs_flux": ("i32", 0),
     "i16_oc_capture": ("i16", 0),
 }
 MS_FIELDS = {"Voltage": ("i32", 0), "Speed": ("u32", 4), "i_q": ("i32", 12), "i_q_setpoint": ("i32", 16),
@@ -883,6 +889,63 @@ def phase_fault_text(fault, s):
     if not fault:
         return "OK"
     return "FAULT axis " + "/".join("ABC"[i] for i in range(3) if fault & (1 << i)) + " - check phase wires / MOSFETs"
+
+
+PID_STEPS = {1: "measuring the resistance", 2: "measuring the inductance", 3: "spinning up: flux linkage"}
+
+
+def measure_motor(settings, stlink, live, log):
+    """Sensorless setup: build + install the measuring firmware (PARAM_ID), let it measure resistance, inductance
+    and flux linkage, return the results (dict) or an error text. The caller saves them and installs the normal
+    firmware again."""
+    log("--- building the measuring firmware ---")
+    if not build_firmware(dict(settings, param_id=True), log=log):
+        return "building the measuring firmware failed"
+    log("--- installing the measuring firmware ---")
+    if not stlink.flash(HEX_FILE, log=lambda l: log(l) if l.strip() and not l.startswith("  ") else None):
+        return "installing failed - check the ST-Link wiring and that the controller is powered"
+    shutil.copy2(ELF_FILE, FLASHED_ELF)
+    live.syms = {}
+    time.sleep(3)                                  # boot and startup melody
+    if not live.load_symbols() or "ui8_setup_cmd" not in live.syms:
+        return "no symbols of the measuring firmware"
+    log("--- measuring (the motor hums, then turns for a few seconds) ---")
+    cmd = live.syms["ui8_setup_cmd"][0]
+    for _ in range(3):
+        stlink.write8(cmd, 2)
+        time.sleep(0.8)
+        snap = live.snapshot() or {}
+        if snap.get("ui8_pid_state") or snap.get("ui8_setup_cmd") == 0:
+            break
+    t0, last = time.time(), None
+    while time.time() - t0 < 40:
+        time.sleep(0.7)
+        snap = live.snapshot()
+        if not snap:
+            continue
+        st = snap.get("ui8_pid_state")
+        if st in PID_STEPS and st != last:
+            log("  " + PID_STEPS[st] + " ...")
+            last = st
+        if st == 4:
+            res = {k: snap.get(k) for k in ("i32_pid_r_mohm", "i32_pid_l_uh", "i32_pid_flux_uwb",
+                                             "i32_pid_obs_r", "i32_pid_obs_l", "i32_pid_obs_flux")}
+            log("  resistance %d mOhm, inductance %d uH, flux linkage %.2f mWb" %
+                (res["i32_pid_r_mohm"], res["i32_pid_l_uh"], res["i32_pid_flux_uwb"] / 1000.0))
+            return res
+        if st == 5:
+            return ("the measurement failed: brake pressed, over current, the motor is not connected, or the rotor "
+                    "did not follow the field (lift the wheel, nothing may block it)")
+        if st == 0 and snap.get("ui8_setup_cmd") == 2 and time.time() - t0 > 5:
+            return "the controller did not start the measurement (throttle or pedals pressed, wheel turning?)"
+    return "no result after 40 s"
+
+
+def apply_motor_params(settings, res):
+    """Measured values -> the sensorless settings (observer units)."""
+    settings["resistance"] = str(max(1, int(res["i32_pid_obs_r"])))
+    settings["inductance"] = str(max(1, int(res["i32_pid_obs_l"])))
+    settings["flux_linkage"] = str(max(1, int(res["i32_pid_obs_flux"])))
 
 
 def hall_spread_text(snap):

@@ -49,6 +49,9 @@ def variant_list():
         for sensorless in (False, True):
             out.append({"name": f"{key.lower()}_{'sensorless' if sensorless else 'hall'}", "display": key,
                         "display_label": label, "sensorless": sensorless})
+    # temporary firmware of the sensorless setup: measures resistance, inductance, flux linkage (PARAM_ID)
+    out.append({"name": "paramid_sensorless", "display": "EBICS", "display_label": "Motor measurement",
+                "sensorless": True, "param_id": True})
     return out
 
 
@@ -166,7 +169,7 @@ def main():
         for v in variants:
             print(f"=== {v['name']}", flush=True)
             s = core.default_settings()
-            s.update(display=v["display"], sensorless=v["sensorless"])
+            s.update(display=v["display"], sensorless=v["sensorless"], param_id=v.get("param_id", False))
             if not core.build_firmware(s, log=lambda l: print("   " + l), root=root):
                 failed.append(v["name"])
                 continue

@@ -384,6 +384,11 @@ static void set_inj_channel(char state);
 void get_standstill_position();
 void svpwm(q31_t q31_u_alpha, q31_t q31_u_beta);
 static void play_melody(void);
+#if defined(SENSORLESS) && defined(PARAM_ID)
+static void pid_measure(void);
+extern volatile uint8_t ui8_pid_rotate;
+extern volatile int32_t i32_pid_step;
+#endif
 q31_t speed_PLL (q31_t ist, q31_t soll, uint8_t speedadapt);
 int32_t map (int32_t x, int32_t in_min, int32_t in_max, int32_t out_min, int32_t out_max);
 int32_t speed_to_tics (uint8_t speed);
@@ -760,6 +765,14 @@ int main(void)
 			HAL_Delay(2); //a few PWM cycles: the interrupt resets the controllers and the voltage while the PWM is off
 			autodetect();
 		}
+#if defined(SENSORLESS) && defined(PARAM_ID)
+		if(ui8_setup_cmd==2 && SystemState == Stop && !MS.i_q_setpoint && !ui8_overcurrent){
+			ui8_setup_cmd=0;
+			CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+			HAL_Delay(2);
+			pid_measure();
+		}
+#endif
 
 
 		/* if(PI_flag){
@@ -2026,6 +2039,9 @@ int main(void)
 			//int16_current_target=0;
 			// call FOC procedure if PWM is enabled
 
+#if defined(SENSORLESS) && defined(PARAM_ID)
+			if (ui8_pid_rotate) q31_teta_obs += i32_pid_step;   //parameter identification: open loop field
+#endif
 			if (ui8_tone_on) {
 				//startup melody: voltage u = amp * sin(tone) along the phase axis (ca, sa), no FOC
 				q31_t q31_s, q31_c;
@@ -2732,6 +2748,183 @@ int main(void)
 			ui8_oc_trips = 255;
 		}
 	}
+
+#if defined(SENSORLESS) && defined(PARAM_ID)
+	// ---- motor parameter identification: a temporary firmware of the setup apps (sensorless motors) ----
+	// The app flashes this build, writes ui8_setup_cmd = 2, reads the results, saves them in the settings and
+	// installs the normal firmware again. Wheel lifted, the motor turns for a few seconds in step 3.
+	// 1. resistance: d current at a fixed angle (the rotor aligns, does not turn) at two levels, R = dU / dI
+	//    (the dead time voltage error is the same at both levels and cancels)
+	// 2. inductance: 1 kHz sine voltage on the d axis (the tone generator of the startup melody) at two current
+	//    levels, |Z| = dU / dI, L = sqrt(Z^2 - R^2) / w
+	// 3. flux linkage: the field is turned open loop (I/f) up to 20 electrical rev/s, the rotor follows; then the
+	//    current is controlled to 0 and the voltage is the back-EMF alone: flux = U / w
+	// Phase volts per voltage unit = Vbat / 3511 (svpwm), amps per current unit = CAL_I mA.
+	volatile uint8_t ui8_pid_state = 0;      // 0 idle, 1 resistance, 2 inductance, 3 flux, 4 done, 5 failed
+	volatile uint8_t ui8_pid_progress = 0;   // %
+	volatile int32_t i32_pid_r_mohm = 0;     // results: mOhm, uH, uWb
+	volatile int32_t i32_pid_l_uh = 0;
+	volatile int32_t i32_pid_flux_uwb = 0;
+	volatile int32_t i32_pid_obs_r = 0;      // the same in the observer units of the settings (obs_resistance ...)
+	volatile int32_t i32_pid_obs_l = 0;
+	volatile int32_t i32_pid_obs_flux = 0;
+	volatile uint8_t ui8_pid_rotate = 0;     // FOC interrupt: turn q31_teta_obs by i32_pid_step per cycle
+	volatile int32_t i32_pid_step = 0;
+
+	static uint32_t pid_isqrt(uint32_t x) {
+		uint32_t r = 0, b = 1UL << 30;
+		while (b > x) b >>= 2;
+		while (b) {
+			if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
+			else r >>= 1;
+			b >>= 2;
+		}
+		return r;
+	}
+
+	static uint8_t pid_wait(uint16_t ms) { // 1 = aborted (brake, over current)
+		while (ms--) {
+			HAL_Delay(1);
+			HAL_IWDG_Refresh(&hiwdg);
+			if (ui8_overcurrent || !HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin)) return 1;
+		}
+		return 0;
+	}
+
+	// mean u_d and i_d over ms milliseconds
+	static uint8_t pid_mean_d(uint16_t ms, int32_t *u, int32_t *i) {
+		int32_t su = 0, si = 0;
+		uint16_t k;
+		for (k = 0; k < ms; k++) {
+			if (pid_wait(1)) return 1;
+			su += MS.u_d;
+			si += MS.i_d;
+		}
+		*u = su / ms;
+		*i = si / ms;
+		return 0;
+	}
+
+	// tone on the d (= alpha at angle 0) axis, amplitude regulated to the peak current target; mean amplitude and
+	// phase A peak current of the last 100 ms
+	static uint8_t pid_tone(int32_t i32_target, int32_t *a, int32_t *p) {
+		int32_t i32_amp = 60, sa = 0, sp = 0, n = 0;
+		uint16_t t;
+		for (t = 0; t < 500; t++) {
+			i16_tone_amp = i32_amp;
+			if (pid_wait(1)) return 1;
+			if ((t & 3) == 3) {
+				int32_t i32_peak = ui16_tone_peak[0];
+				ui16_tone_peak[0] = ui16_tone_peak[1] = ui16_tone_peak[2] = 0;
+				if (t >= 400) { sa += i32_amp; sp += i32_peak; n++; }
+				else if (i32_peak < i32_target) i32_amp += (i32_amp >> 4) + 1;
+				else i32_amp -= i32_amp >> 4;
+				if (i32_amp > 1800) i32_amp = 1800;
+			}
+		}
+		*a = sa / n;
+		*p = sp / n;
+		return 0;
+	}
+
+	static void pid_measure(void) {
+		int32_t i32_vbat = adcData[0] * CAL_V;          // mV
+		int32_t i32_cal = CAL_I >> 8;                    // mA per current unit
+		int32_t i32_div = (3511 * i32_cal) / 100;        // x*10 / i32_div: (units x mV / units) -> mOhm
+		int32_t i1 = RS.ph_current_max >> 2, i2 = RS.ph_current_max >> 1;
+		int32_t u1, a1, u2, a2, d;
+		uint32_t z, x;
+		uint16_t k;
+		if (i1 < 40) i1 = 40;                            // at least ~1.5 / 3 A
+		if (i2 < 80) i2 = 80;
+		ui8_pid_state = 1; ui8_pid_progress = 0;
+
+		// 1. resistance
+		q31_teta_obs = 0;
+		MS.i_q_setpoint = 0;
+		MS.i_d_setpoint = i1;
+		SET_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		if (pid_wait(600) || pid_mean_d(200, &u1, &a1)) goto fail;
+		MS.i_d_setpoint = i2;
+		if (pid_wait(300) || pid_mean_d(200, &u2, &a2)) goto fail;
+		d = a2 - a1; if (d < 0) d = -d;
+		if (d < 10) goto fail;                           // the current did not follow: motor not connected?
+		u2 -= u1; if (u2 < 0) u2 = -u2;
+		i32_pid_r_mohm = ((u2 * i32_vbat / d) * 10) / i32_div;
+		MS.i_d_setpoint = 0;
+		ui8_pid_progress = 30;
+
+		// 2. inductance
+		ui8_pid_state = 2;
+		CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		pid_wait(50);
+		i16_tone_ca = 1024; i16_tone_sa = 0;
+		ui32_tone_step = 1000UL * 272196UL;               // 1 kHz
+		i16_tone_amp = 0;
+		ui8_tone_on = 1;
+		SET_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		if (pid_tone(i1, &u1, &a1) || pid_tone(i2, &u2, &a2)) goto fail;
+		ui8_tone_on = 0;
+		CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		d = a2 - a1;
+		if (d < 10 || u2 <= u1) goto fail;
+		z = (uint32_t) ((((u2 - u1) * i32_vbat / d) * 10) / i32_div);        // |Z| in mOhm
+		x = (z > (uint32_t) i32_pid_r_mohm) ? pid_isqrt(z * z - (uint32_t) (i32_pid_r_mohm * i32_pid_r_mohm)) : 0;
+		i32_pid_l_uh = (int32_t) ((x * 1000UL) / 6283UL);                    // X / (2 pi 1 kHz)
+		ui8_pid_progress = 50;
+		pid_wait(100);
+
+		// 3. flux linkage
+		ui8_pid_state = 3;
+		q31_teta_obs = 0;
+		i32_pid_step = 0;
+		ui8_pid_rotate = 1;
+		MS.i_d_setpoint = i2;
+		SET_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		if (pid_wait(400)) goto fail;                    // align
+		for (k = 0; k < 3000; k++) {                     // ramp to 20 erev/s in 3 s
+			i32_pid_step = (int32_t) ((5443000UL / 3000UL) * k);
+			if (pid_wait(1)) goto fail;
+			if ((k & 63) == 0) ui8_pid_progress = 50 + (uint8_t) ((k * 40UL) / 3000UL);
+		}
+		i32_pid_step = 5443000L;                         // 20 * 2^32 / 15779
+		if (pid_wait(500)) goto fail;
+		MS.i_d_setpoint = 0;                             // current 0: the voltage is the back-EMF
+		if (pid_wait(20)) goto fail;                     // short: without current the rotor slows down
+		{
+			int32_t su = 0;
+			for (k = 0; k < 20; k++) {
+				if (pid_wait(1)) goto fail;
+				su += (int32_t) pid_isqrt((uint32_t) (MS.u_d * MS.u_d + MS.u_q * MS.u_q));
+			}
+			u1 = su / 20;
+		}
+		ui8_pid_rotate = 0;
+		CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		u1 = u1 * i32_vbat / 3511;                       // back-EMF peak in mV
+		if (u1 < 100) goto fail;                         // the rotor did not follow
+		{
+			int32_t f_x100 = (int32_t) (((5443000UL >> 8) * 15779UL) / 167772UL);  // frequency x100 (step*f_FOC/2^32)
+			i32_pid_flux_uwb = (u1 * 15915L) / f_x100;   // U / (2 pi f)
+		}
+		// observer units (same conversion as tools/motor_sim.py: L*2^16/1.5, R*2^9/1.5, flux*256000)
+		i32_pid_obs_r = (i32_pid_r_mohm * 512 + 750) / 1500;
+		i32_pid_obs_l = (i32_pid_l_uh * 437 + 5000) / 10000;
+		i32_pid_obs_flux = (i32_pid_flux_uwb * 256 + 500) / 1000;
+		ui8_pid_progress = 100;
+		ui8_pid_state = 4;
+		goto end;
+	fail:
+		ui8_pid_state = 5;
+	end:
+		ui8_tone_on = 0;
+		ui8_pid_rotate = 0;
+		i32_pid_step = 0;
+		MS.i_d_setpoint = 0;
+		CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		HAL_Delay(2);
+	}
+#endif
 
 	void get_standstill_position(){
 		HAL_Delay(100);

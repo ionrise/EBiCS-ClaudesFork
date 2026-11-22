@@ -92,6 +92,17 @@ standstill detection. The motor parameters (inductance, resistance, flux linkage
 overflow-safe version (error < 0.06 deg). Hall calibration and the gearing measurement are skipped for sensorless motors.
 Test with the wheel lifted and low current first.
 
+**Motor measurement (sensorless setup step):** instead of guessing the parameters, the wizard (PC and phone) installs
+a measuring firmware for a minute (`PARAM_ID` build, prebuilt as `paramid_sensorless` for the phone), which measures:
+- resistance: d current into the standing rotor at two levels, R = dU / dI (the dead time error cancels)
+- inductance: a 1 kHz sine voltage on the d axis at two current levels, |Z| = dU / dI, L = sqrt(Z^2 - R^2) / w
+- flux linkage: the field is turned open loop up to 20 electrical rev/s, then the current is controlled to 0: the
+  voltage is the back-EMF alone, flux = U / w
+
+The values go into the settings (observer units) and the normal firmware is installed again. Checked with the motor
+model of `tools/motor_sim.py` (direct drive and geared motor: R and L within 2 %, flux within 5 %). Wheel lifted:
+the motor turns for a few seconds.
+
 ### 5. Speed sensor and motor temperature on one wire
 
 Many hub motors have one wire for the speed sensor *and* the temperature sensor (NTC between the signal and GND, the

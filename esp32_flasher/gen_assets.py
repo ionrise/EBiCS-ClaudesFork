@@ -43,7 +43,7 @@ def gen_variants(fw_dir):
            "struct FwVariant { const char *name, *display, *label; bool sensorless; const uint8_t *data; uint32_t size;"
            " uint32_t crc; const FwSym *syms; uint8_t nsyms; };", ""]
     entries = []
-    for i, v in enumerate(man["variants"]):
+    for i, v in enumerate(x for x in man["variants"] if not x.get("param_id")):   # no measuring firmware on the ESP32
         data = (fw_dir / v["file"]).read_bytes()
         syms = json.loads((fw_dir / v["symbols"]).read_text())
         out.append(f"static const uint8_t fw_{i}[] = {{\n{c_bytes(data)}\n}};")

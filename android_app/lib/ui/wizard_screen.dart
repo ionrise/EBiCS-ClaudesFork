@@ -553,6 +553,80 @@ class _CalibrateStepState extends State<_CalibrateStep> {
     });
   }
 
+  /// Sensorless: install the measuring firmware, measure, save the values, install the normal firmware again.
+  Future<void> _measure() async {
+    final app = AppScope.read(context);
+    final c = app.controller;
+    setState(() {
+      _running = true;
+      _progress = 0;
+    });
+    String? error;
+    Map<String, int>? res;
+    try {
+      _set('Installing the measuring firmware ...', Tone.busy, '');
+      await c.installMeasuring(app.settings, (step, p) => _set('Installing the measuring firmware ...', Tone.busy, step));
+      await Future<void>.delayed(const Duration(seconds: 3)); // boot and startup melody
+      _set('Measuring ...', Tone.busy, 'The motor hums, then turns for a few seconds.');
+      await c.startMeasuring();
+      final t0 = DateTime.now();
+      while (DateTime.now().difference(t0).inSeconds < 40) {
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+        Map<String, int>? snap;
+        try {
+          snap = await c.snapshot();
+        } catch (_) {}
+        if (snap == null) continue;
+        final st = snap['ui8_pid_state'] ?? 0;
+        if (mounted) setState(() => _progress = (snap!['ui8_pid_progress'] ?? 0) / 100);
+        if (st == 1) _set('Measuring the resistance ...', Tone.busy);
+        if (st == 2) _set('Measuring the inductance ...', Tone.busy);
+        if (st == 3) _set('Spinning up: flux linkage ...', Tone.busy);
+        if (st == 4) {
+          res = snap;
+          break;
+        }
+        if (st == 5) {
+          error = 'The measurement failed: brake pressed, over current, motor not connected, or the rotor did not '
+              'follow the field (lift the wheel, nothing may block it).';
+          break;
+        }
+        if (st == 0 && snap['ui8_setup_cmd'] == 2 && DateTime.now().difference(t0).inSeconds > 5) {
+          error = 'The controller did not start the measurement (throttle or pedals pressed, wheel turning?).';
+          break;
+        }
+      }
+      if (res == null && error == null) error = 'No result after 40 s.';
+    } catch (e) {
+      error = '$e';
+    }
+    var s = app.settings;
+    if (res != null) {
+      s = s.copy();
+      int at1(int? v) => (v ?? 0) < 1 ? 1 : v!;
+      s['resistance'] = '${at1(res['i32_pid_obs_r'])}';
+      s['inductance'] = '${at1(res['i32_pid_obs_l'])}';
+      s['flux_linkage'] = '${at1(res['i32_pid_obs_flux'])}';
+      app.save(s);
+    }
+    try {
+      _set(res != null ? 'Installing the firmware with the measured values ...' : 'Installing the normal firmware again ...',
+          Tone.busy, '');
+      await c.install(s, (step, p) => _set(_status, Tone.busy, step));
+    } catch (e) {
+      error ??= 'Installing the normal firmware failed: $e';
+    }
+    if (!mounted) return;
+    setState(() => _running = false);
+    if (res != null && error == null) {
+      _set('Measured and installed.', Tone.ok,
+          'Resistance ${res['i32_pid_r_mohm']} mOhm, inductance ${res['i32_pid_l_uh']} uH, flux linkage '
+          '${((res['i32_pid_flux_uwb'] ?? 0) / 1000).toStringAsFixed(2)} mWb.');
+    } else {
+      _set(error ?? 'Failed.', Tone.bad);
+    }
+  }
+
   Future<void> _start() async {
     final c = AppScope.read(context).controller;
     setState(() => _running = true);
@@ -670,13 +744,33 @@ class _CalibrateStepState extends State<_CalibrateStep> {
     final s = AppScope.of(context).settings;
     if (s.sensorless) {
       return _Page([
-        _p(context, 'Sensorless motor: there are no hall sensors to calibrate.'),
-        const Bullets([
-          "Check the motor parameters in Settings > Expert > 'Sensorless' (inductance, resistance, flux linkage, "
-              'gain, angle offset).',
-          'The motor starts with a short open loop spin before the observer takes over.',
-          'Sensorless is experimental: test with the wheel lifted, low current first.',
-        ]),
+        _p(context,
+            "Sensorless motor: the controller needs the motor's resistance, inductance and flux linkage. A measuring "
+            'firmware is installed for a minute, measures them, then your normal firmware is installed again with '
+            'the measured values.'),
+        _p(context,
+            'Now: resistance ${s.s('resistance')}, inductance ${s.s('inductance')}, flux linkage '
+            '${s.s('flux_linkage')} (observer units, Settings > Expert).',
+            muted: true),
+        CheckboxListTile(
+          contentPadding: EdgeInsets.zero,
+          value: _checks[0],
+          onChanged: _running ? null : (v) => setState(() => _checks[0] = v == true),
+          title: const Text('The wheel is lifted and spins freely, the brake is released, hands and cables are away '
+              'from the wheel'),
+        ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton(
+            onPressed: !_running && _checks[0] ? _measure : null,
+            child: const Text('Measure the motor'),
+          ),
+        ),
+        StatusLine(_status, tone: _tone),
+        if (_running) LinearProgressIndicator(value: _progress > 0 ? _progress : null),
+        const SizedBox(height: 8),
+        _p(context, _detail, muted: true),
+        _p(context, 'You can skip this step and keep the values in Settings.', muted: true),
       ]);
     }
     const texts = [calCheckText];
