@@ -24,9 +24,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "main.h"
 #include "display_kingmeter.h"
 #include "stm32f1xx_hal.h"
-#include "print.h"
 
-#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER)
 
 // Definitions
 #define RXSTATE_STARTCODE   0
@@ -45,7 +44,7 @@ extern UART_HandleTypeDef huart1;
 
 
 // Hashtable used for handshaking in 901U protocol
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U)
  const uint8_t KM_901U_HANDSHAKE[64] =
  {
  		137,
@@ -121,7 +120,7 @@ extern UART_HandleTypeDef huart1;
 static void KM_618U_Service(KINGMETER_t* KM_ctx);
 #endif
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U)
 static void KM_901U_Service(KINGMETER_t* KM_ctx);
 #endif
 
@@ -176,7 +175,7 @@ void KingMeter_Init (KINGMETER_t* KM_ctx)
     KM_ctx->Rx.AssistLevel                  = 3; 					//J-LCD Level 1...5
 #endif
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U)
 	KM_ctx->Rx.AssistLevel                  = 128;					//MK5S Level 0...255
 #endif
 
@@ -205,7 +204,7 @@ void KingMeter_Init (KINGMETER_t* KM_ctx)
      }
 #endif
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U)
     //Start UART with DMA
     if (HAL_UART_Receive_DMA(&huart1, (uint8_t *)KM_ctx->RxBuff, 64) != HAL_OK)
      {
@@ -227,7 +226,7 @@ void KingMeter_Service(KINGMETER_t* KM_ctx)
     KM_618U_Service(KM_ctx);
     #endif
 
-    #if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+    #if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U)
     KM_901U_Service(KM_ctx);
     #endif
 }
@@ -350,7 +349,7 @@ static void KM_618U_Service(KINGMETER_t* KM_ctx)
 
 
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U)
 /****************************************************************************************************
  * KM_901U_Service() - Communication protocol of 901U firmware
  *

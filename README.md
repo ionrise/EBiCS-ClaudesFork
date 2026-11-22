@@ -37,9 +37,9 @@ Both apps also set up **Kunteng (KT) controllers** (STM8S105) with the open sour
 
 ## What's different from upstream
 
-### 1. EBiCS Setup app (new)
+### 1. IonRiseSetApp (EBiCS setup app)
 
-`EBiCS Setup.bat` starts a Python app (`setup_app/`) that replaces the Java configurator for normal use:
+`IonRiseSetApp.bat` starts a Python app (`setup_app/`) that replaces the Java configurator for normal use:
 
 | Page | What it does |
 |---|---|
@@ -152,9 +152,26 @@ read from the STM8 EEPROM at power up, so they can be changed in a second withou
 SDCC to build the KT firmware (`winget install SDCC.SDCC`) and Python `pyusb` + `libusb-package` for USB (it
 offers to install them). Not tested on a real KT controller yet: test with the wheel lifted.
 
+### 9. ionrise version (branch `ionrise`)
+
+- **Startup melody + phase test** (Lishui and Kunteng): at power-up the motor windings play a short ionrise
+  jingle (~1 s). The audio frequency voltage gives no torque on average, so the wheel doesn't move and no hall
+  calibration is needed. Every note uses the next phase axis (A, B, C) and the phase currents are checked: an
+  open phase wire or a dead MOSFET is reported (live view "Motor phases") and the motor stays off until the
+  next power-up. Lishui: setting "Startup melody volume" (% of the phase current, 0 = off, default 50).
+  Kunteng: "Startup melody + phase test" on/off (half of the phase current limit, max 7 A). The brake or
+  turning the wheel stops it.
+- **Hall calibration starts backwards** (Lishui: backwards as set by "Reverse motor direction"): a geared hub's
+  freewheel lets the motor turn without the wheel. The wizard has one safety tick (wheel lifted, brake released,
+  hands away, chain off on direct drive motors) and afterwards asks "did the motor first turn backwards and
+  then forwards?" - "No" reverses the direction setting (Kunteng: swap two phase and the matching two hall wires).
+- **No debug build any more**: the debug display variant, UART debug printing (`print.c`), fast loop logging and
+  "autodetect at every power-up" are removed - live data over the ST-Link replaces them. Saves flash.
+- Apps named **IonRiseSetApp** (ionrise logo, EBiCS kept as the firmware name), firmware version "ionrise ...".
+
 ## Android app (setup from a phone)
 
-`android_app/` is a Flutter app (**EBiCS Setup** APK) with the same first-setup wizard as the desktop app, plus
+`android_app/` is a Flutter app (**IonRiseSetApp** APK) with the same first-setup wizard as the desktop app, plus
 Settings, Live data and Tools. It talks to an **ST-Link V2** plugged into the phone with a **USB OTG adapter**
 (own ST-Link driver, no other app needed) and flashes **prebuilt firmware** that ships inside the APK: one per
 display protocol, each for hall sensor and sensorless motors. Your settings go into the runtime settings block.
@@ -197,7 +214,7 @@ have an STM8S105 chip instead of an STM32. EBiCS doesn't run on them, so they ge
 (casainho's, with bug fixes) instead. **Support for them is being added to the PC setup app and comes in the next
 version of this repository.** How it works:
 
-- Start `EBiCS Setup.bat` and choose **Kunteng** on the first page (Lishui is the other choice).
+- Start `IonRiseSetApp.bat` and choose **Kunteng** on the first page (Lishui is the other choice).
 - Wire the ST-Link V2 to the 4 pin header on the KT board: **3.3V, SWIM, GND, RST**. The ST-Link talks to the
   STM8 over the SWIM pin; no other programmer or software (STVP) is needed.
 - The app asks for the controller type (6 or 12 MOSFET), battery cells, motor current, speed limit, wheel size,
@@ -242,7 +259,7 @@ The Lishui programming plug (white, 4 pins) usually has these colours - **check 
 ## First setup, step by step
 
 1. Wire the ST-Link, plug it into USB, switch the controller on, **lift the wheel**.
-2. Double-click **`EBiCS Setup.bat`** and click **Start first setup**.
+2. Double-click **`IonRiseSetApp.bat`** and click **Start first setup**.
 3. **Connect** - the page checks every 2 seconds until the controller answers.
 4. **Unlock** - a new controller is read-protected. Tick the box and click *Unlock chip* (this erases the original
    firmware), then switch the controller off and on.
@@ -250,14 +267,15 @@ The Lishui programming plug (white, 4 pins) usually has these colours - **check 
    torque sensor, throttle, EU legal mode. Hover over a question for help.
 6. **Install** - builds the firmware for your answers and flashes it (about a minute).
 7. **Motor calibration** - confirm the wheel can spin freely, click *Start calibration*:
-   - *Finding the hall sensor positions* - the motor turns slowly 3 turns forward and 3 back and may click
+   - *Finding the hall sensor positions* - the motor turns slowly 3 turns BACKWARDS, then 3 forward and may click
      (about 11 s). Every hall edge is measured in both directions: the rotor lags the field (friction) and the
      sensors switch late in the direction of travel, both with the opposite sign backwards, so the average is
      the true position and the difference shows how good the measurement is (shown after the calibration)
    - *Measuring the motor speed* - the wheel spins up to full speed (can take a few minutes)
    - *Wait until the wheel has stopped* - the app waits until the hall sensors stop changing
    - The six hall angles are checked (they should be about 60 degrees apart)
-8. **Motor direction** - tell the app whether the wheel turned forward; if not it reverses the direction.
+8. **Motor direction** - did the motor first turn backwards, then forwards during the calibration? If not, the
+   app reverses the direction.
 9. **Gearing** - mark the tyre, click *Start measuring*, turn the wheel **backwards** by hand exactly 3 turns, click
    *Done*. This sets "pole pairs x gear ratio", which makes the displayed speed and the speed limit correct.
 10. **Update** - if steps 8 or 9 changed something, the firmware is installed again (the calibration is kept).
@@ -284,7 +302,6 @@ On the phone: Settings -> **Write to controller** (see [Android app](#android-ap
 | Tongsheng | VLCD5, VLCD6, XH18 | New |
 | VESC UART | VESC displays / apps | New, telemetry + current command |
 | EBiCS app | EBiCS BLE module + Flutter app | |
-| No display | Debug text on the UART at 56000 baud | |
 
 **Multi-protocol displays:** set the display to **5S / KM5S** and choose KM5S in the app. Protocols without a public
 specification (APT, KDS ...) are not supported.

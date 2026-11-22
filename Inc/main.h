@@ -114,6 +114,16 @@
 #ifndef FW_RAMP_MS
 #define FW_RAMP_MS 500                         // field weakening: ms from 0 to FW_CURRENT_MAX
 #endif
+#ifndef ASSIST_PCT_1
+#define ASSIST_PCT_1 20                        // phase current of the assist levels 1 ... 5 in % (displays with levels)
+#define ASSIST_PCT_2 40
+#define ASSIST_PCT_3 60
+#define ASSIST_PCT_4 80
+#define ASSIST_PCT_5 100
+#endif
+#ifndef MELODY_PCT
+#define MELODY_PCT 50                          // startup melody volume in % of the phase current, 0 = off
+#endif
 #ifndef FW_VOLTAGE_PCT
 #define FW_VOLTAGE_PCT 90                      // field weakening keeps the voltage use at this % of the maximum
 #endif
@@ -124,6 +134,9 @@
 #define SPEED_TEMP_THRESHOLD 100               // ADC value below = speed pulse, above = NTC temperature
 #endif
 #define INT_TEMP_25 0
+// internal temperature sensor at 25 deg C without a calibration: STM32F103 datasheet typical 1.43 V at 3.3 V = ADC 1775
+// (the chips spread +-0.09 V, so the reading is about +-15 deg C; INT_TEMP_25 0 also keeps the controller derating off)
+#define INT_TEMP_V25_TYPICAL 1775
 #define TORQUE_OFFSET 850
 //#define USE_FIX_POSITIONS 1
 //Put values from the startup message after autodetect here, if you want to use fix positions. 32bit values for the hall angles!

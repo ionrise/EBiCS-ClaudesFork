@@ -60,8 +60,7 @@ class _KtHomeScreenState extends State<KtHomeScreen> {
     final ok = await confirm(
       context,
       'Hall autodetect',
-      'The motor turns slowly forward and back (about 6 s, ~2.5 A).\n\nLift the wheel, release the brake and keep '
-          'hands away from the wheel. Needs the firmware installed by this app.',
+      '$ktAdStart\n\nNeeds the firmware installed by this app.',
       yes: 'Start',
     );
     if (!ok || !mounted) return;
@@ -69,6 +68,10 @@ class _KtHomeScreenState extends State<KtHomeScreen> {
       final r = await AppScope.read(context).ktController.autodetect(_add);
       for (final l in ktDescribeAutodetect(r)) {
         _add(l);
+      }
+      if (r['ui8_ad_state'] == 3 && mounted) {
+        final back = await confirm(context, 'Motor direction', ktAdQuestion, yes: 'Yes, backwards first');
+        _add(back ? 'direction OK' : ktAdWrongWay);
       }
     });
   }

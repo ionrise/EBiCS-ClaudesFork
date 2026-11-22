@@ -40,7 +40,6 @@ Src/main.c \
 Src/FOC.c \
 Src/eeprom.c \
 Src/stm32f1xx_it.c \
-Src/print.c \
 Src/stm32f1xx_hal_msp.c \
 Src/display_bafang.c \
 Src/display_kingmeter.c \

@@ -499,10 +499,22 @@ void ebike_throotle_type_torque_sensor (void)
   }
 }
 
+volatile uint8_t ui8_test_throttle = 0;
+volatile uint8_t ui8_test_throttle_ttl = 0;
+
 void read_throotle (void)
 {
   // read torque sensor signal
   ui8_adc_throttle_value = ui8_adc_read_throttle ();
+  // test throttle written by the setup apps over SWIM (0 = the real throttle): test spins and tuning on the
+  // stand without touching the bike. Lost at every reset.
+  // ui8_test_throttle_ttl: calls of read_throotle the value stays valid; the app writes it again and again, so a
+  // lost SWIM connection (motor current disturbs it) stops the motor by itself
+  if (ui8_test_throttle_ttl)
+  {
+    ui8_test_throttle_ttl--;
+    if (ui8_test_throttle) { ui8_adc_throttle_value = ui8_test_throttle; }
+  }
 
   // a reading above ADC_THROTTLE_MAX_ERROR means a broken ground wire or a short to 5 V, not full throttle:
   // ignore the throttle and show error 01 until the signal is back in range for 1 s

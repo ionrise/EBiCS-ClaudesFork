@@ -21,7 +21,7 @@ motor temperature: the weakening current heats the motor without adding power.
 
 ## Using it
 
-PC: start `EBiCS Setup.bat`, choose **Kunteng / KT** on the start screen, then follow the 4 steps on
+PC: start `IonRiseSetApp.bat`, choose **Kunteng / KT** on the start screen, then follow the 4 steps on
 the home page (check connection, unlock, settings, install). Android: choose **Kunteng / KT** on the
 app's start screen.
 

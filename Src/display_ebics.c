@@ -7,7 +7,6 @@
 
 #include "main.h"
 #include "stm32f1xx_hal.h"
-#include "print.h"
 #include "config.h"
 
 extern UART_HandleTypeDef huart1;

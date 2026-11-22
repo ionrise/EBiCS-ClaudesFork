@@ -51,17 +51,12 @@
 // It uses the OpenSTM32 workbench (SW4STM32 toolchain)
 // Basic peripheral setup was generated with CubeMX
 
-#include "print.h"
 #include "FOC.h"
 #include "config.h"
 #include "eeprom.h"
-#if (DISPLAY_TYPE != DISPLAY_TYPE_DEBUG)
-//no UART debug output without the debug display: saves the printf code (flash)
-#define printf_(...) ((void)0)
-#endif
 
 
-#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER)
 #include "display_kingmeter.h"
 #endif
 
@@ -130,7 +125,7 @@ uint16_t ui16_brake_adc;
 uint32_t ui32_throttle_cumulated;
 uint32_t ui32_torque_cumulated_raw;
 uint32_t ui32_brake_adc_cumulated;
-uint32_t ui32_int_Temp_cumulated = INT_TEMP_25<<5;
+uint32_t ui32_int_Temp_cumulated = (INT_TEMP_25 ? INT_TEMP_25 : INT_TEMP_V25_TYPICAL)<<5;
 int16_t i16_int_Temp_V25;
 uint16_t ui16_ph1_offset=0;
 uint16_t ui16_ph2_offset=0;
@@ -204,9 +199,7 @@ q31_t q31_u_d_temp=0;
 q31_t q31_u_q_temp=0;
 int16_t i16_sinus=0;
 int16_t i16_cosinus=0;
-char buffer[100];
 char char_dyn_adc_state_old=1;
-const uint8_t assist_factor[10]={0, 51, 102, 153, 204, 255, 255, 255, 255, 255};
 const uint8_t assist_profile[2][6]= {	{0,10,20,30,45,48},
 		{64,64,128,200,255,0}};
 
@@ -290,6 +283,12 @@ static uint8_t ui8_oc_count = 0;
 // overcurrent trip capture for live data: u_q, u_d, phase 1, phase 2, CCR1..3, PWM cycles since switch-on, setup state
 volatile int16_t i16_oc_capture[9];
 static uint16_t ui16_moe_cycles = 0;
+// startup melody (ionrise): the FOC interrupt puts an audio frequency voltage on one phase axis instead of the FOC
+volatile uint8_t ui8_tone_on = 0;
+static uint32_t ui32_tone_step, ui32_tone_phase;
+static int16_t i16_tone_amp, i16_tone_ca, i16_tone_sa;
+static volatile uint16_t ui16_tone_peak[3];
+volatile uint8_t ui8_phase_fault = 0;         // phase test of the startup melody: bit 0..2 = axis A, B, C failed (motor blocked)
 int32_t i32_ramp_step16 = 0;                  // current ramp: setpoint step per FOC cycle <<16, 0 = no ramp
 int32_t i32_iq_ramped16 = 0;                  // ramped phase current setpoint <<16
 volatile uint8_t ui8_kv_valid = 0;            // 1 = motor constant KV measured (EEPROM or KV detect), needed for coasting
@@ -306,7 +305,7 @@ enum state SystemState;
 
 
 //variables for display communication
-#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER)
 KINGMETER_t KM;
 #endif
 
@@ -372,7 +371,7 @@ void Set_Hall_Angle120(void);
 
 /* USER CODE BEGIN PFP */
 /* Private function prototypes -----------------------------------------------*/
-#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER|| DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER)
 void kingmeter_update(void);
 #endif
 
@@ -383,6 +382,8 @@ void bafang_update(void);
 static void dyn_adc_state(q31_t angle);
 static void set_inj_channel(char state);
 void get_standstill_position();
+void svpwm(q31_t q31_u_alpha, q31_t q31_u_beta);
+static void play_melody(void);
 q31_t speed_PLL (q31_t ist, q31_t soll, uint8_t speedadapt);
 int32_t map (int32_t x, int32_t in_min, int32_t in_max, int32_t out_min, int32_t out_max);
 int32_t speed_to_tics (uint8_t speed);
@@ -574,7 +575,7 @@ int main(void)
 	}
 
 
-#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER || DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER)
 	KingMeter_Init (&KM);
 #endif
 
@@ -639,6 +640,13 @@ int main(void)
 	//run: state 0 doesn't update the phase currents, they kept the raw ADC values (~2048) of the offset measurement and
 	//the first switch-on after power up tripped the overcurrent protection at once (real motor)
 	MS.char_dyn_adc_state = 1;
+#ifndef DISABLE_DYNAMIC_ADC
+	//the offsets go into the ADC only with set_inj_channel(), which the interrupt calls when the state changes. State 1
+	//at power up is no change, so the first PWM cycles read raw ADC values (~1024): the startup melody switched the PWM
+	//on right away and tripped the overcurrent protection in the 3rd cycle (real motor)
+	set_inj_channel(1);
+	char_dyn_adc_state_old = 1;
+#endif
 	i16_ph1_current = 0;
 	i16_ph2_current = 0;
 	ui8_adc_offset_done_flag=1;
@@ -665,70 +673,35 @@ int main(void)
 	ui32_throttle_cumulated=ui16_throttle_offset<<4;
 #endif
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_DEBUG)
-	printf_("phase current offsets:  %d, %d, %d \n ", ui16_ph1_offset, ui16_ph2_offset, ui16_ph3_offset);
-	printf_("internal temperature raw reading:  %d, \n ", adcData[7]);
-#if (AUTODETECT == 1)
-	if(adcData[0]*CAL_V>RS.battery_voltage_min) autodetect();
-	else printf_("Battery voltage too low!:  %d,\n ",adcData[0]);
-#endif
-
-#endif
 
 	{
 		HAL_IWDG_Refresh(&hiwdg);//do nothing (For Safety at switching on)
 	}
 	//read internal temp calibration from emulated EEPROM
 	EE_ReadVariable(EEPROM_INT_TEMP_V25, &i16_int_Temp_V25);
-	if(!i16_int_Temp_V25)i16_int_Temp_V25=INT_TEMP_25; //use value from main.h, if not in EEPROM yet.
+	if(!i16_int_Temp_V25)i16_int_Temp_V25=INT_TEMP_25 ? INT_TEMP_25 : INT_TEMP_V25_TYPICAL; //not calibrated: main.h value, else the datasheet typical (was 0 = about -300 deg C shown)
 
 #if (!USE_FIX_POSITIONS)
 	uint16_t ui16_hall_order_status = EE_ReadVariable(EEPROM_POS_HALL_ORDER, (uint16_t*)&i16_hall_order);
-	printf_("Hall_Order: %d \n",i16_hall_order);
 	// set varaiables to value from emulated EEPROM only if valid
 	if(ui16_hall_order_status==0) { //0 = variable found in EEPROM
 		ui8_hall_calibrated=1;
 		int16_t temp;
-
-		EE_ReadVariable(EEPROM_POS_HALL_45, &temp);
-		Hall_45 = temp<<16;
-		printf_("Hall_45: %d \n",	(int16_t) (((Hall_45 >> 23) * 180) >> 8));
-		printf_("Hall_45: %u \n",	Hall_45);
-		HAL_IWDG_Refresh(&hiwdg);
-
-		EE_ReadVariable(EEPROM_POS_HALL_51, &temp);
-		Hall_51 = temp<<16;
-		printf_("Hall_51: %d \n",	(int16_t) (((Hall_51 >> 23) * 180) >> 8));
-		printf_("Hall_51: %u \n",	Hall_51);
-		HAL_IWDG_Refresh(&hiwdg);
-
-		EE_ReadVariable(EEPROM_POS_HALL_13, &temp);
-		Hall_13 = temp<<16;
-		printf_("Hall_13: %d \n",	(int16_t) (((Hall_13 >> 23) * 180) >> 8));
-		printf_("Hall_13: %u \n",	Hall_13);
-		HAL_IWDG_Refresh(&hiwdg);
-
-		EE_ReadVariable(EEPROM_POS_HALL_32, &temp);
-		Hall_32 = temp<<16;
-		printf_("Hall_32: %d \n",	(int16_t) (((Hall_32 >> 23) * 180) >> 8));
-		printf_("Hall_32: %u \n",	Hall_32);
-		HAL_IWDG_Refresh(&hiwdg);
-
-		EE_ReadVariable(EEPROM_POS_HALL_26, &temp);
-		Hall_26 = temp<<16;
-		printf_("Hall_26: %d \n",	(int16_t) (((Hall_26 >> 23) * 180) >> 8));
-		printf_("Hall_26: %u \n",	Hall_26);
-		HAL_IWDG_Refresh(&hiwdg);
-
-		EE_ReadVariable(EEPROM_POS_HALL_64, &temp);
-		Hall_64 = temp<<16;
-		printf_("Hall_64: %d \n",	(int16_t) (((Hall_64 >> 23) * 180) >> 8));
-		printf_("Hall_64: %u \n",	Hall_64);
-		HAL_IWDG_Refresh(&hiwdg);
+		//hall edge angles (a loop over a table: 6 copies of the same code were ~60 bytes more, the sensorless
+		//build with the Kunteng display was full)
+#ifndef SENSORLESS //not used without hall sensors
+		static const uint16_t ui16_hall_ee[6] = {EEPROM_POS_HALL_45, EEPROM_POS_HALL_51, EEPROM_POS_HALL_13,
+				EEPROM_POS_HALL_32, EEPROM_POS_HALL_26, EEPROM_POS_HALL_64};
+		q31_t * const q31_hall_dst[6] = {&Hall_45, &Hall_51, &Hall_13, &Hall_32, &Hall_26, &Hall_64};
+		for (i = 0; i < 6; i++) {
+			EE_ReadVariable(ui16_hall_ee[i], (uint16_t *) &temp);
+			*q31_hall_dst[i] = temp<<16;
+			HAL_IWDG_Refresh(&hiwdg);
+		}
+#endif
 
 		if(EE_ReadVariable(EEPROM_POS_KV, (uint16_t*)&ui32_KV)==0 && ui32_KV>0) ui8_kv_valid=1;
 		if(ui32_KV<=0)ui32_KV=111;
-		printf_("KV: %d \n",ui32_KV	);
 		HAL_IWDG_Refresh(&hiwdg);
 
 	}
@@ -757,16 +730,13 @@ int main(void)
 
 	// set absolute position to corresponding hall pattern.
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_DEBUG)
-	printf_("Lishui FOC v1.0 \n ");
-
-#endif
 
 
 	CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);//Disable PWM
 
 	get_standstill_position();
 
+	play_melody();
 
 	//	init_watchdog();
 
@@ -798,7 +768,7 @@ int main(void)
 	  }*/
 		//display message processing
 		if(ui8_UART_flag){
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U||DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U)
 
 			KingMeter_Service(&KM);
 #endif
@@ -896,22 +866,6 @@ int main(void)
 			ui8_SPEED_control_flag=0;
 		}
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_DEBUG && defined(FAST_LOOP_LOG))
-		if(ui8_debug_state==3 && ui8_UART_TxCplt_flag){
-			sprintf_(buffer, "%d, %d, %d, %d, %d, %d\r\n", e_log[k][0], e_log[k][1], e_log[k][2],e_log[k][3],e_log[k][4],e_log[k][5]); //>>24
-			i=0;
-			while (buffer[i] != '\0')
-			{i++;}
-			ui8_UART_TxCplt_flag=0;
-			HAL_UART_Transmit_DMA(&huart1, (uint8_t *)&buffer, i);
-			k++;
-			if (k>299){
-				k=0;
-				ui8_debug_state=0;
-				//Obs_flag=0;
-			}
-		}
-#endif
 
 		//--------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -956,11 +910,11 @@ int main(void)
 			}
 			else { // torque-simulation mode: assist from the cadence (PAS) and the assist level
 #if (DISPLAY_TYPE & DISPLAY_TYPE_BAFANG)
-				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, (RS.ph_current_max*(int32_t)(assist_factor[MS.assist_level]))>>8, 0); // level in range 0...5
+				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, (RS.ph_current_max*(int32_t)assist_from_level(MS.assist_level))>>8, 0); // level 0...9, % per level from the settings
 #endif
 
 #if (DISPLAY_TYPE == DISPLAY_TYPE_KUNTENG)
-				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, (RS.ph_current_max*(int32_t)(MS.assist_level))/5, 0); // level in range 0...5
+				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, (RS.ph_current_max*(int32_t)assist_from_level(MS.assist_level))>>8, 0); // level 0...5, % per level from the settings
 #endif
 
 #if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_618U)
@@ -971,9 +925,6 @@ int main(void)
 				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, ((RS.ph_current_max*(int32_t)(MS.assist_level)))>>8, 0); // level in range 0...255
 #endif
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_DEBUG)
-				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, RS.ph_current_max, 0); // Full amps in debug mode
-#endif
 
 				if(RS_FLAG(SF_DIRDET)){ //direction detection
 					if (uint32_PAS_counter< RS.pas_timeout){
@@ -1055,7 +1006,7 @@ int main(void)
 			}
 		}
 
-#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER || DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER)
 			if(KM.DirectSetpoint!=-1)int32_temp_current_target=(KM.DirectSetpoint*RS.ph_current_max)>>7;
 #endif
 #if (DISPLAY_TYPE == DISPLAY_TYPE_VESC)
@@ -1284,30 +1235,6 @@ int main(void)
 				else if(ui8_6step_flag) SystemState = SixStep;
 				else SystemState = Running;
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_DEBUG && !defined(FAST_LOOP_LOG))
-				//print values for debugging
-
-				sprintf_(buffer, "%d, %d, %d, %d, %d, %d, %d, %d, %d\r\n",
-						adcData[1],
-						i16_60deg_Hall_flag,
-						ui8_hall_state,
-						uint32_PAS,
-						MS.Battery_Current,
-						int32_temp_current_target ,
-						MS.i_q,
-						MS.u_abs,
-						SystemState);
-				// sprintf_(buffer, "%d, %d, %d, %d, %d, %d, %d\r\n",(uint16_t)adcData[0],(uint16_t)adcData[1],(uint16_t)adcData[2],(uint16_t)adcData[3],(uint16_t)(adcData[4]),(uint16_t)(adcData[5]),(uint16_t)(adcData[6])) ;
-				// sprintf_(buffer, "%d, %d, %d, %d, %d, %d\r\n",tic_array[0],tic_array[1],tic_array[2],tic_array[3],tic_array[4],tic_array[5]) ;
-				i=0;
-				while (buffer[i] != '\0')
-				{i++;}
-				HAL_UART_Transmit_DMA(&huart1, (uint8_t *)&buffer, i);
-
-
-				ui8_print_flag=0;
-
-#endif
 
 #if (DISPLAY_TYPE == DISPLAY_TYPE_EBiCS)
 				ui8_slowloop_counter++;
@@ -2099,7 +2026,21 @@ int main(void)
 			//int16_current_target=0;
 			// call FOC procedure if PWM is enabled
 
-			if (READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)){
+			if (ui8_tone_on) {
+				//startup melody: voltage u = amp * sin(tone) along the phase axis (ca, sa), no FOC
+				q31_t q31_s, q31_c;
+				uint8_t k;
+				int16_t i16_i[3] = {i16_ph1_current, i16_ph2_current, -i16_ph1_current - i16_ph2_current};
+				ui32_tone_phase += ui32_tone_step;
+				arm_sin_cos_q31((q31_t) ui32_tone_phase, &q31_s, &q31_c);
+				int32_t i32_u = ((int32_t) i16_tone_amp * (q31_s >> 16)) >> 15;
+				svpwm((i32_u * i16_tone_ca) >> 10, (i32_u * i16_tone_sa) >> 10);
+				for (k = 0; k < 3; k++) {
+					uint16_t ui16_a = i16_i[k] < 0 ? -i16_i[k] : i16_i[k];
+					if (ui16_a > ui16_tone_peak[k]) ui16_tone_peak[k] = ui16_a;
+				}
+			}
+			else if (READ_BIT(TIM1->BDTR, TIM_BDTR_MOE)){
 #ifdef SENSORLESS
 				FOC_calculation(i16_ph1_current, i16_ph2_current, q31_teta_obs, (((int16_t)i8_direction*i8_reverse_flag)*MS.i_q_setpoint), &MS);
 #else
@@ -2314,7 +2255,7 @@ int main(void)
 
 		/* Apply Rx parameters */
 
-		MS.assist_level = No2.Rx.AssistLevel;
+		MS.assist_level = assist_from_level(No2.Rx.AssistLevel >> 4); //display level 0 ... 15 (<<4), % per level from the settings
 
 		if(!No2.Rx.Headlight)
 		{
@@ -2341,7 +2282,7 @@ int main(void)
 
 #endif
 
-#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER || DISPLAY_TYPE & DISPLAY_TYPE_DEBUG)
+#if (DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER)
 	void kingmeter_update(void)
 	{
 		/* Prepare Tx parameters */
@@ -2597,9 +2538,6 @@ int main(void)
 			HAL_Delay(5);
 
 			if (ui8_hall_state_old != ui8_hall_state) {
-				printf_("angle: %d, hallstate:  %d, hallcase %d, q31_angle %u \n",
-						(int16_t) (((q31_rotorposition_absolute >> 23) * 180) >> 8),
-						ui8_hall_state, ui8_hall_case,q31_rotorposition_absolute);
 
 				switch (ui8_hall_case) //12 cases for each transition from one stage to the next. 6x forward, 6x reverse
 				{
@@ -2640,13 +2578,19 @@ int main(void)
 		//	uint8_t zerocrossing = 0;
 		//	q31_t diffangle = 0;
 		HAL_Delay(5);
-		// Forward 3 electrical turns, then back 3 turns. Each hall edge is seen in both directions: the rotor
-		// lags the field (friction, cogging) and the hall sensors switch late in the direction of travel, both
-		// with the opposite sign backwards. The average is the true edge, the difference shows how good the
-		// measurement is (like the Fardriver autodetect).
-		autodetect_sweep(1, q31_hall_fwd, 0);
-		i8_direction_fwd = i8_recent_rotor_direction;
-		autodetect_sweep(-1, q31_hall_bwd, 50);
+		// 3 electrical turns each way. Each hall edge is seen in both directions: the rotor lags the field
+		// (friction, cogging) and the hall sensors switch late in the direction of travel, both with the opposite
+		// sign the other way. The average is the true edge, the difference shows how good the measurement is
+		// (like the Fardriver autodetect). Backwards (as set by 'reverse') first: a geared hub's freewheel lets the
+		// motor turn freely without the wheel, and the apps ask "first backwards, then forwards?" to check the
+		// direction setting. fwd/bwd below are the electrical directions (+1 / -1).
+		{
+			int8_t i8_first = -i8_direction;
+			autodetect_sweep(i8_first, i8_first > 0 ? q31_hall_fwd : q31_hall_bwd, 0);
+			if (i8_first > 0) i8_direction_fwd = i8_recent_rotor_direction;
+			autodetect_sweep(-i8_first, i8_first > 0 ? q31_hall_bwd : q31_hall_fwd, 50);
+			if (i8_first < 0) i8_direction_fwd = i8_recent_rotor_direction;
+		}
 
 		CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE); //Disable PWM if motor is not turning
 		TIM1->CCR1 = 1023; //set initial PWM values
@@ -2662,7 +2606,6 @@ int main(void)
 
 		if(ui8_setup_halls_found != 0x3F || ui8_setup_halls_found_bwd != 0x3F){ //not all 6 hall positions seen in both directions: wiring/hall problem, don't save garbage
 			ui8_setup_state = 4;
-			printf_("autodetect failed, halls found: %d / %d \n", ui8_setup_halls_found, ui8_setup_halls_found_bwd);
 			return;
 		}
 		{
@@ -2710,6 +2653,84 @@ int main(void)
 		ui8_KV_detect_flag = 30;
 
 
+	}
+
+	// ionrise startup melody, played by the motor windings: an audio frequency voltage along one phase axis gives
+	// no torque on average, the wheel doesn't move and no hall calibration is needed. Every note uses the next
+	// phase axis (A, B, C) and checks the phase currents: the axis phase carries the current, the other two half
+	// of it each. An open phase wire or a dead MOSFET is found before the ride: ui8_phase_fault, motor blocked.
+	// The voltage is adjusted so the peak current is melody_pct of the phase current (the coil impedance rises
+	// with the frequency). Brake, wheel movement or an overcurrent trip end it.
+	static const uint8_t ui8_melody[][3] = { // note Hz/16 (0 = pause), length in 5 ms, volume in 1/8
+		{49, 20, 8}, {0, 6, 0}, {65, 20, 8}, {0, 6, 0}, {82, 68, 8}, {0, 14, 0}, {98, 14, 5}, {0, 5, 0}, {131, 60, 6}};
+
+	static void play_melody(void) {
+		static const int16_t i16_axis[3][2] = {{1024, 0}, {-512, 887}, {-512, -887}};
+		int32_t i32_target = (RS.ph_current_max * RS.melody_pct) / 100;
+		int32_t i32_amp = 150; // voltage (of _U_MAX), found by the loop below
+		uint32_t ui32_halls = ui32_hall_events;
+		uint16_t ui16_f_old = 0;
+		uint8_t n, k, ui8_axis = 0, ui8_faults = 0;
+		if (!RS.melody_pct) return;
+		if (i32_target < 40) i32_target = 40; // ~1.5 A: enough for the phase test
+		i16_tone_amp = 0;
+		ui8_tone_on = 1; // also in the pauses (amplitude 0): the FOC must not run
+		SET_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		for (n = 0; n < sizeof(ui8_melody) / 3; n++) {
+			uint16_t ui16_f = ui8_melody[n][0] * 16, ui16_len = ui8_melody[n][1] * 5, t;
+			uint16_t ui16_max[3] = {0, 0, 0};
+			int32_t i32_tgt = (i32_target * ui8_melody[n][2]) >> 3;
+			if (ui16_f) {
+				if (ui16_f_old) i32_amp = (i32_amp * ui16_f) / ui16_f_old; // inductive: voltage ~ frequency
+				ui16_f_old = ui16_f;
+				ui32_tone_step = ui16_f * 272196UL; // 2^32 / 15779 Hz FOC rate
+				i16_tone_ca = i16_axis[ui8_axis][0];
+				i16_tone_sa = i16_axis[ui8_axis][1];
+			}
+			for (t = 0; t < ui16_len; t++) {
+				int32_t i32_env = 256; // 5 ms up, 15 ms down: no clicks
+				if (t < 5) i32_env = t * 51;
+				if (ui16_len - t < 15) i32_env = (ui16_len - t) * 17;
+				if (i32_amp > 1800) i32_amp = 1800;
+				i16_tone_amp = (i32_amp * i32_env * ui8_melody[n][2]) >> 11;
+				HAL_Delay(1);
+				HAL_IWDG_Refresh(&hiwdg);
+				if (ui16_f && (t & 3) == 3 && i32_env == 256) {
+					uint16_t ui16_p = 0;
+					for (k = 0; k < 3; k++) {
+						if (ui16_tone_peak[k] > ui16_p) ui16_p = ui16_tone_peak[k];
+						if (ui16_tone_peak[k] > ui16_max[k]) ui16_max[k] = ui16_tone_peak[k];
+						ui16_tone_peak[k] = 0;
+					}
+					if (ui16_p < i32_tgt) i32_amp += (i32_amp >> 3) + 1;
+					else i32_amp -= i32_amp >> 3;
+				}
+				if (!HAL_GPIO_ReadPin(Brake_GPIO_Port, Brake_Pin) || ui32_hall_events != ui32_halls || ui8_overcurrent) {
+					ui8_faults = 0;
+					goto end;
+				}
+			}
+			if (ui16_f) {
+				// phase test: largest ~ the axis phase, smallest ~ half of it. Open phase: nothing flows (axis on
+				// that phase) or one of the others stays at 0.
+				uint16_t ui16_hi = 0, ui16_lo = 65535;
+				for (k = 0; k < 3; k++) {
+					if (ui16_max[k] > ui16_hi) ui16_hi = ui16_max[k];
+					if (ui16_max[k] < ui16_lo) ui16_lo = ui16_max[k];
+				}
+				if (ui16_hi < 20 || ui16_lo * 4 < ui16_hi) ui8_faults |= 1 << ui8_axis;
+				if (++ui8_axis > 2) ui8_axis = 0;
+			}
+		}
+	end:
+		ui8_tone_on = 0;
+		CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+		HAL_Delay(2); // the FOC interrupt resets the PWM pattern and the controllers while the PWM is off
+		ui8_phase_fault = ui8_faults;
+		if (ui8_faults) {
+			ui8_overcurrent = 1; // motor off until restart
+			ui8_oc_trips = 255;
+		}
 	}
 
 	void get_standstill_position(){
@@ -3099,7 +3120,6 @@ void Set_Hall_Angle60(void){
 		{
 			ui8_watchdog_reset=1;
 
-			printf_("watchdog reset!\n");
 			HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
 			// do not continue here if reset from watchdog
 			//while(1){}
@@ -3108,7 +3128,6 @@ void Set_Hall_Angle60(void){
 		else
 		{
 			HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_RESET);
-			printf_("regular reset\n\n");
 
 		}
 		__HAL_RCC_CLEAR_RESET_FLAGS();

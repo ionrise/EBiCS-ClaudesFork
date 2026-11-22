@@ -24,7 +24,6 @@
 "Src/display_vesc.o"
 "Src/eeprom.o"
 "Src/main.o"
-"Src/print.o"
 "Src/sensorless.o"
 "Src/settings.o"
 "Src/stm32f1xx_hal_msp.o"

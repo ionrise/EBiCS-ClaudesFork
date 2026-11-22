@@ -181,7 +181,11 @@ void sensorless_startup(MotorState_t* MS_FOC, int16_t target)
 		// current controlled open loop (I/f, like the hall autodetect): rotate the angle, regulate i_d,
 		// q current 0. The old fixed voltage ramp gave motor dependent currents.
 		int32_t t = target > 0 ? target : -target;
-		i_start = t < RS.ph_current_max ? t : RS.ph_current_max;
+		// open loop current at most half the phase current (at least ~4 A): with 18 A (20 A setting) the observer
+		// missed the hand-over about every second start on the real motor, with 10 A every start worked
+		int32_t cap = RS.ph_current_max >> 1;
+		if (cap < 105) cap = RS.ph_current_max < 105 ? RS.ph_current_max : 105;
+		i_start = t < cap ? t : cap;
 		MS_FOC->i_d_setpoint = (startup_counter < STARTUP_RAMP) ? (i_start * startup_counter) / STARTUP_RAMP : i_start;
 		q31_teta_obs += (target > 0) ? STARTUP_STEP : -STARTUP_STEP;
 		if (++startup_counter > STARTUP_CYCLES) {

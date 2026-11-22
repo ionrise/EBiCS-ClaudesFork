@@ -25,7 +25,7 @@ class KtProbe {
     if (!targetFound) {
       return 'ST-Link found, but the KT controller does not answer.\n'
           '  - is the controller switched on (battery)?\n'
-          '  - 4 wires on the KT programming header: 3.3V, SWIM, GND, RST'
+          '  - SWIM wire on the SWIM pin of the ST-Link (not SWDIO), GND connected (3.3V and RST optional)'
           '${error.isNotEmpty ? '\n  ($error)' : ''}';
     }
     return locked
@@ -86,6 +86,10 @@ class KtController {
     }
     final out = <String, Object>{};
     try {
+      // the live link runs with SWIM_DM on: if the CPU got stalled (SWIM disturbed by the motor current), the PWM
+      // keeps its last duty cycle and nothing controls the motor - clear the stall bit at once (DM_CSR2 bit 3)
+      final dm = await _live!.readByte(Swim.dmCsr2);
+      if (dm & 0x08 != 0) await _live!.writeByte(Swim.dmCsr2, dm & ~0x08);
       for (final v in ktLiveVars) {
         final sym = _liveSyms![v.name];
         if (sym == null) continue;
@@ -159,6 +163,32 @@ class KtController {
     } finally {
       await s.close();
       if (t is UsbBridge) await t.close();
+      await _releaseAfterReset();
+    }
+  }
+
+  /// After a reset through SWIM the debug mode can keep the CPU stalled (real KT controller: no melody, no motor
+  /// after installing until power off). Connect live and clear the stall bit (DM_CSR2 bit 3).
+  Future<void> _releaseAfterReset() async {
+    for (var i = 0; i < 6; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      final t = _transport();
+      try {
+        if (t is UsbBridge) await t.open();
+        final s = Swim(t, sleep: sleep);
+        try {
+          await s.openLive();
+          final d = await s.readByte(Swim.dmCsr2);
+          if (d & 0x08 != 0) await s.writeByte(Swim.dmCsr2, d & ~0x08);
+          return;
+        } finally {
+          await s.close();
+        }
+      } catch (_) {
+        // try again
+      } finally {
+        if (t is UsbBridge) await t.close();
+      }
     }
   }
 

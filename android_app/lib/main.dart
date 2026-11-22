@@ -30,7 +30,7 @@ class EbicsApp extends StatelessWidget {
     return AppScope(
       state: state,
       child: MaterialApp(
-        title: 'EBiCS Setup',
+        title: 'IonRiseSetApp',
         debugShowCheckedModeBanner: false,
         theme: _theme(Brightness.light),
         darkTheme: _theme(Brightness.dark),
@@ -76,7 +76,7 @@ class _ChooserScreenState extends State<ChooserScreen> {
       ),
     );
     return Scaffold(
-      appBar: AppBar(title: const Text('EBiCS Setup')),
+      appBar: AppBar(title: const Text('IonRiseSetApp')),
       body: RadioGroup<String>(
         groupValue: _sel,
         onChanged: (v) => setState(() => _sel = v ?? _sel),

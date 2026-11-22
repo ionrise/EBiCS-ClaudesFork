@@ -328,3 +328,10 @@ Future<bool> confirm(BuildContext context, String title, String text, {String ye
 void snack(BuildContext context, String msg) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
 }
+
+// autodetect texts (the hall calibration starts backwards: autodetect() in Src/main.c, kunteng/motor.c)
+const calCheckText = 'The wheel is lifted and spins freely, the brake is released, hands and cables are away from the wheel - and on a direct drive (gearless) hub motor the chain is off';
+const warnFirstBack = 'The motor first turns slowly BACKWARDS, then forwards. Watch which way it turns: you will be asked afterwards.';
+const ktAdStart = 'The motor first turns BACKWARDS 3 turns, then forwards 2.5 turns (about 6 s, ~2.5 A). Watch which way it turns.\n\nConfirm: the wheel is lifted and spins freely, the brake is released, hands and cables are away from the wheel, and on a direct drive (gearless) hub motor the chain is off.';
+const ktAdQuestion = 'Did the motor first turn backwards and then forwards?';
+const ktAdWrongWay = 'The motor runs the wrong way with this wiring: swap two motor phase wires and the matching two hall wires (e.g. blue and green of each), then run the autodetect again.';

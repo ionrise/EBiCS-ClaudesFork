@@ -77,15 +77,31 @@ class UsbTransport:
             raise SwimError("ST-Link not found. Plug it into USB (a different port helps sometimes).")
         self.dev = devs[0]
         self.ep_out, self.ep_in = STLINK_PIDS[self.dev.idProduct]
-        try:
+        # another program may hold the ST-Link for a moment (STM32CubeProgrammer calls of the Lishui live view take
+        # ~0.2 s each): WinUSB then answers "access denied". Try again for a few seconds before giving up.
+        err = None
+        for _ in range(12):
             try:
-                self.dev.set_configuration()
-            except usb.core.USBError:
-                pass  # already configured by the driver
-            usb.util.claim_interface(self.dev, 0)
-        except Exception as e:
+                try:
+                    self.dev.set_configuration()
+                except usb.core.USBError:
+                    pass  # already configured by the driver
+                usb.util.claim_interface(self.dev, 0)
+                err = None
+                break
+            except Exception as e:
+                err = e
+                try:
+                    usb.util.dispose_resources(self.dev)
+                except Exception:
+                    pass
+                time.sleep(0.4)
+        if err is not None:
+            if "Errno 13" in str(err) or "Access denied" in str(err):
+                raise SwimError("The ST-Link is in use by another program (%s). Close STM32CubeProgrammer / ST-Link "
+                                "Utility and the Lishui live view, then try again." % err)
             raise SwimError("Cannot open the ST-Link (%s). Close STM32CubeProgrammer / ST-Link Utility. If it still fails, "
-                            "the ST-Link needs the WinUSB driver (Zadig, or ST's ST-Link driver)." % e)
+                            "the ST-Link needs the WinUSB driver (Zadig, or ST's ST-Link driver)." % err)
         self._usb = usb
 
     def write(self, data, timeout=3000):
@@ -110,6 +126,7 @@ class Swim:
         self.sleep = sleep
         self.read_buf_size = 6144
         self.version = None
+        self.stalled = False   # open() put the CPU in debug mode (stalled): close() starts the firmware again
 
     # ---------------------------------------------------------------- low level
     def _cmd(self, *args, data=b"", rx=0):
@@ -138,6 +155,10 @@ class Swim:
                 stalls = 0
             last = st
             self.sleep(0.01)
+        if args[0] == SWIM_ENTER_SEQ:
+            raise SwimError("SWIM command 04: the KT controller does not answer (status %02x). Is it switched on with the "
+                            "battery? Is the wire on the SWIM pin of the ST-Link (not SWDIO) and GND connected? RST is "
+                            "normally not needed." % (last[0] if last else 0xFF))
         raise SwimError("SWIM command %02x failed (status %02x). Check the wiring (SWIM, GND, RST) and that the "
                         "controller is powered." % (args[0], last[0] if last else 0xFF))
 
@@ -189,6 +210,7 @@ class Swim:
         self._swim(SWIM_ENTER_SEQ)
         # mask interrupts, access to the whole memory, SWIM has priority, stall the CPU
         self.write_byte(SWIM_CSR, 0xA1)
+        self.stalled = True
         self._swim(SWIM_DEASSERT_RESET)
         self.sleep(0.001)
         self._high_speed()
@@ -216,7 +238,11 @@ class Swim:
         self.read_buf_size = (bs[0] | (bs[1] << 8)) or 6144
         self._cmd(SWIM, SWIM_READ_CAP, 0x01, rx=8)
         self._swim(SWIM_ENTER_SEQ)
+        self._swim(SWIM_SPEED, 0)       # a fresh link is low speed (the ST-Link may still be set to high speed)
         self._swim(SWIM_RESET)          # resynchronise the SWIM clock, does not reset the chip
+        # SWIM_DM on, STALL off: memory reads failed (status 04) without it on a running KT controller, with it they
+        # work and the CPU keeps running (DM_CSR2 stall bit stays 0)
+        self.write_byte(SWIM_CSR, 0x21)
         return self
 
     def _high_speed(self):
@@ -232,13 +258,19 @@ class Swim:
             self._swim(SWIM_SPEED, 1)
 
     def reset_target(self):
-        """Start the firmware (system reset through SWIM)."""
+        """Start the firmware (system reset through SWIM, the SWIM link ends with it)."""
         self.write_byte(SWIM_CSR, self.read_byte(SWIM_CSR) | 0x04)
         self._swim(SWIM_GEN_RST)
         self.sleep(0.001)
+        self.stalled = False
 
     def close(self):
         if self.t is not None:
+            if self.stalled:   # e.g. a connection check: don't leave the controller stopped
+                try:
+                    self.reset_target()
+                except Exception:
+                    pass
             try:
                 self._cmd(SWIM, SWIM_EXIT)
             except Exception:
@@ -372,12 +404,32 @@ def probe(transport=None):
         info["option_bytes"] = opt.hex()
     except SwimError as e:
         info["error"] = str(e)
-        info["probe"] = info["probe"] or "SWIM command" in str(e)
+        info["probe"] = info["probe"] or s.t is not None   # the USB device was opened: the ST-Link itself is there
     except Exception as e:  # USB errors from pyusb
         info["error"] = str(e)
     finally:
         s.close()
     return info
+
+
+def release_after_reset(transport=None, tries=6):
+    """After reset_target() the debug mode (SWIM_DM) can keep the CPU stalled: the firmware does not start until
+    the controller is switched off (real KT controller: no melody, no motor after installing). Connect live and
+    clear the stall bit. Returns True when the CPU runs."""
+    for _ in range(tries):
+        time.sleep(0.3)
+        s = Swim(transport)
+        try:
+            s.open_live()
+            d = s.read_byte(DM_CSR2)
+            if d & 0x08:
+                s.write_byte(DM_CSR2, d & ~0x08)
+            return True
+        except Exception:
+            pass
+        finally:
+            s.close()
+    return False
 
 
 def unlock(log=print, transport=None):
@@ -391,6 +443,8 @@ def unlock(log=print, transport=None):
         else:
             log("option bytes ok")
         s.reset_target()
+    if transport is None:
+        release_after_reset()
     return True
 
 
@@ -412,6 +466,8 @@ def write_settings(settings_block, log=print, transport=None):
     with Swim(transport, log) as s:
         _write_settings(s, settings_block, log)
         s.reset_target()
+    if transport is None:
+        release_after_reset()
     return True
 
 
@@ -447,4 +503,6 @@ def flash(ihx_path, log=print, transport=None, clear_eeprom_key=True, settings_b
             _write_settings(s, settings_block, log)
         s.reset_target()
     log("firmware installed and verified")
+    if transport is None:
+        release_after_reset()
     return True

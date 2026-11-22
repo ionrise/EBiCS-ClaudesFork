@@ -93,7 +93,7 @@ class Swim {
       await _sleep(const Duration(milliseconds: 10));
     }
     throw SwimException(
-      'SWIM command 0x${args[0].toRadixString(16)} failed. Check the wiring (SWIM, GND, RST) '
+      'SWIM command 0x${args[0].toRadixString(16)} failed. Check the wiring (SWIM pin of the ST-Link, GND) '
       'and that the controller is powered.',
     );
   }
@@ -143,6 +143,7 @@ class Swim {
     await _swimCmd([swimAssertReset]);
     await _swimCmd([swimEnterSeq]);
     await writeByte(swimCsr, 0xA1); // mask interrupts, whole memory, SWIM priority, stall the CPU
+    _stalled = true;
     await _swimCmd([swimDeassertReset]);
     await _sleep(const Duration(milliseconds: 1));
     var csr = 0;
@@ -171,15 +172,27 @@ class Swim {
     readBufSize = (bs[0] | (bs[1] << 8)) == 0 ? 6144 : (bs[0] | (bs[1] << 8));
     await _cmd([_swim, swimReadCap, 0x01], rx: 8);
     await _swimCmd([swimEnterSeq]);
+    await _swimCmd([swimSpeed, 0]); // a fresh link is low speed (the ST-Link may still be set to high speed)
     await _swimCmd([swimReset]); // resynchronises the SWIM clock, does not reset the chip
+    // SWIM_DM on, STALL off: reads failed on a running KT controller without it; the CPU keeps running
+    await writeByte(swimCsr, 0x21);
   }
 
+  /// Starts the firmware (system reset through SWIM, the SWIM link ends with it).
   Future<void> resetTarget() async {
     await writeByte(swimCsr, (await readByte(swimCsr)) | 0x04);
     await _swimCmd([swimGenRst]);
+    _stalled = false;
   }
 
+  bool _stalled = false; // open() stalled the CPU: close() starts the firmware again
+
   Future<void> close() async {
+    if (_stalled) {
+      try {
+        await resetTarget();
+      } catch (_) {}
+    }
     try {
       await _cmd([_swim, swimExit]);
     } catch (_) {}

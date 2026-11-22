@@ -105,6 +105,8 @@ static const ebics_settings_t settings_default = {
 	.fw_battery_current_max = FW_BATTERY_CURRENT_MAX,
 	.fw_ramp_ms = FW_RAMP_MS,
 	.fw_voltage_pct = FW_VOLTAGE_PCT,
+	.melody_pct = MELODY_PCT,
+	.assist_pct = {ASSIST_PCT_1, ASSIST_PCT_2, ASSIST_PCT_3, ASSIST_PCT_4, ASSIST_PCT_5},
 };
 
 uint32_t settings_crc32(const uint8_t *data, uint32_t len)
@@ -143,6 +145,7 @@ static uint8_t settings_plausible(const ebics_settings_t *s)
 	if (s->fw_current_max < 0 || s->fw_current_max > 4000 || s->fw_battery_current_max < 0) return 0;
 	if (s->fw_ramp_ms < 0 || s->fw_ramp_ms > 10000) return 0;
 	if (s->fw_voltage_pct != 0 && (s->fw_voltage_pct < 50 || s->fw_voltage_pct > 98)) return 0;
+	if (s->melody_pct < 0 || s->melody_pct > 100) return 0;
 	return 1;
 }
 
@@ -158,4 +161,17 @@ void settings_load(void)
 		ui8_settings_source = 1;
 	}
 	else ui8_settings_source = 2;
+}
+
+// assist level of the display (1..5, higher = level 5) -> 0..255 share of the phase current (RS.assist_pct).
+// 0 % = the old 20 % steps (a settings block of an older app has 0 there), more than 100 % = 100 %.
+uint8_t assist_from_level(uint8_t ui8_level)
+{
+	uint32_t p;
+	if (!ui8_level) return 0;
+	if (ui8_level > 5) ui8_level = 5;
+	p = RS.assist_pct[ui8_level - 1];
+	if (!p) p = ui8_level * 20U;
+	if (p > 100) p = 100;
+	return (uint8_t) ((p * 255U) / 100U);
 }

@@ -10,6 +10,7 @@
 
 #include "config.h"
 #include "main.h"
+#include "settings.h"
 #include "stm32f1xx_hal.h"
 
 #if (DISPLAY_TYPE == DISPLAY_TYPE_TONGSHENG)
@@ -68,7 +69,7 @@ static void ts_apply_rx(TONGSHENG_t* ts, const uint8_t *f)
 		MS.assist_level = 255;      // push assist current = RS.pushassist_current
 	} else {
 		ui8_Push_Assist_flag = 0;
-		MS.assist_level = ts->assist_level * 51;
+		MS.assist_level = assist_from_level(ts->assist_level); // % per level from the settings
 	}
 
 	HAL_GPIO_WritePin(LIGHT_GPIO_Port, LIGHT_Pin, ts->light ? GPIO_PIN_SET : GPIO_PIN_RESET);

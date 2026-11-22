@@ -29,6 +29,7 @@ LIVE_VARS = [
     ("ui16_emf_duty_per_erps_x256", "u16", "Back-EMF constant", "", 1),
     ("i8_hall_offset", "i8x8", "Learned hall offsets", "/256", 1),
     ("ui8_fw_angle", "u8", "Field weakening angle", "deg", 360 / 256),
+    ("ui8_phase_fault", "u8", "Phase test fault (bit 0..2 = axis A, B, C)", "", 1),
 ]
 SIZES = {"u8": 1, "i8": 1, "u16": 2, "i16": 2, "f32": 4, "i8x8": 8, "u8x8": 8}
 
@@ -106,9 +107,20 @@ class LiveSession:
         self.s.open_live()
         self.open = True
 
+    def release_stall(self):
+        """The live link runs with SWIM_DM on (reads fail without it). If the CPU got stalled (seen on a real KT
+        controller while the motor ran: SWIM disturbed by the motor current), the PWM keeps its last duty cycle and
+        the firmware no longer controls the motor: clear the stall bit at once."""
+        d = self.s.read_byte(swim.DM_CSR2)
+        if d & 0x08:
+            self.s.write_byte(swim.DM_CSR2, d & ~0x08)
+            return True
+        return False
+
     def snapshot(self):
         if not self.open:
             self.connect()
+        self.release_stall()
         snap = {}
         for name, typ, label, unit, scale in LIVE_VARS:
             if name not in self.symbols:
@@ -126,6 +138,7 @@ class LiveSession:
     def read_vars(self, names_types):
         if not self.open:
             self.connect()
+        self.release_stall()
         out = {}
         for name, typ in names_types:
             if name in self.symbols:

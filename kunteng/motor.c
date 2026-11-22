@@ -24,6 +24,7 @@
 #include "adc.h"
 #include "watchdog.h"
 #include "stm8s_exti.h"
+#include "brake.h"
 
 #define SVM_TABLE_LEN 256
 
@@ -328,6 +329,8 @@ uint8_t ui8_motor_startup_counter;
 uint8_t ui8_motor_controller_state = MOTOR_CONTROLLER_STATE_OK;
 uint8_t ui8_hall_sensors = 0;
 uint8_t ui8_hall_sensors_last = 0;
+static uint8_t ui8_hall_candidate = 0;        // hall filter: state read last time and how often in a row
+static uint8_t ui8_hall_candidate_count = 0;
 uint8_t ui8_half_erps_flag = 0;
 uint8_t ui8_flag_foc_read_id_current = 0;
 uint8_t ui8_flag_foc_read_id_current_2 = 0;
@@ -337,6 +340,8 @@ uint8_t ui8_adc_id_current = 0;
 uint16_t ui16_rotor_angle_x256;                   // 8.8 fixed point
 uint16_t ui16_angle_step_x256 = 0;                // per PWM cycle
 uint8_t ui8_sector_angle_limit = 42;              // max angle past the last hall edge
+volatile uint16_t ui16_hall_edges = 0;          // diagnostics: hall edges since power up (wraps)
+volatile uint16_t ui16_hall_skips = 0;          // diagnostics: edges to a state that is not a neighbour (noise)
 uint16_t ui16_sector_cycles[8];                   // PWM cycles spent in each hall state (last time)
 uint16_t ui16_period_sum = 0;                     // sum of the last 6 sectors = one electrical revolution
 uint8_t ui8_valid_edges = 0;                      // consecutive forward hall edges since the last reset
@@ -399,6 +404,11 @@ uint8_t ui8_over_current_counter = 0;
 uint8_t ui8_over_current_retries = 0;
 uint8_t ui8_hall_invalid_counter = 0;
 uint8_t ui8_coasting = 0;              // geared motor, no current requested: PWM off, motor spins freely
+// startup melody (motor_melody): tone frequency step and phase, voltage axis, phase test result
+static uint16_t ui16_tone_step = 0;
+static uint16_t ui16_tone_phase = 0;
+static uint8_t ui8_tone_axis = 0;
+volatile uint8_t ui8_phase_fault = 0;  // bit 0..2: no phase B current on axis A, B, C (open phase): motor stays off
 uint8_t ui8_coast_counter = 0;
 // back-EMF constant: duty cycle per erps (x256), learned whenever the current is ~0 A. Used to restart a
 // spinning motor after coasting and as the lower duty cycle limit while regen braking.
@@ -442,6 +452,8 @@ uint8_t ui8_brake_pwm_off = 0;              // braking without a known back-EMF 
 // current alone can not tell "0 A" from "motor shorted" (duty cycle far below the back-EMF: phase current
 // flows, battery current is ~0)
 uint8_t ui8_phase_b_peak_running = 0;
+static uint8_t ui8_phase_b_now = 0;          // phase B current of this PWM cycle (0.121 A steps)
+static uint8_t ui8_phase_b_limit = 120;      // phase current limit in phase B steps (motor_init)
 volatile uint8_t ui8_phase_b_peak = 0;
 #define PHASE_B_ZERO 126
 #define PHASE_B_SMALL 24                    // ~3 A
@@ -494,10 +506,31 @@ void TIM1_UPD_OVF_TRG_BRK_IRQHandler(void) __interrupt(TIM1_UPD_OVF_TRG_BRK_IRQH
 
   /****************************************************************************/
   // hall sensors: rotor angle at every edge, sector timing, speed
-  ui8_hall_sensors = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
+  ui8_temp = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
 #ifdef SIMULATION
-  if (ui8_ad_active) { ui8_hall_sensors = sim_hall (); }
+  if (ui8_ad_active) { ui8_temp = sim_hall (); }
 #endif
+  // hall filter: the hall wires pick up the switching noise at high current (real direct drive motor: hall
+  // states of 0.1 % of a revolution, the commutation jumped and the motor bucked on the stand). A new state is
+  // taken when it was read in 2 PWM cycles in a row (128 us), a state that is not a neighbour of the last one
+  // (a skipped state) after 4 cycles. One sector lasts at least 5 cycles at the maximum speed.
+  if (ui8_temp == ui8_hall_candidate)
+  {
+    if (ui8_hall_candidate_count < 255) { ui8_hall_candidate_count++; }
+  }
+  else
+  {
+    ui8_hall_candidate = ui8_temp;
+    ui8_hall_candidate_count = 1;
+  }
+  ui8_hall_sensors = ui8_hall_sensors_last;
+  if ((ui8_hall_candidate_count >= 2) &&
+      ((ui8_hall_candidate_count >= 4) || (ui8_hall_sensors_last < 1) || (ui8_hall_sensors_last > 6) ||
+       (ui8_hall_next_state[ui8_hall_sensors_last] == ui8_hall_candidate) ||
+       (ui8_hall_next_state[ui8_hall_candidate & 7] == ui8_hall_sensors_last)))
+  {
+    ui8_hall_sensors = ui8_hall_candidate;
+  }
   if (ui8_hall_sensors != ui8_hall_sensors_last)
   {
     if ((ui8_hall_sensors == 0) || (ui8_hall_sensors == 7))
@@ -515,6 +548,14 @@ void TIM1_UPD_OVF_TRG_BRK_IRQHandler(void) __interrupt(TIM1_UPD_OVF_TRG_BRK_IRQH
       goto hall_done;
     }
     ui8_hall_invalid_counter = 0;
+    // diagnostics (live data): edges, and edges that skip a state (neither the next nor the previous state)
+    ui16_hall_edges++;
+    if ((ui8_hall_sensors_last >= 1) && (ui8_hall_sensors_last <= 6) &&
+        (ui8_hall_next_state[ui8_hall_sensors_last] != ui8_hall_sensors) &&
+        (ui8_hall_next_state[ui8_hall_sensors] != ui8_hall_sensors_last))
+    {
+      ui16_hall_skips++;
+    }
 
     ui8_previous_state = ui8_hall_sensors_last;
     ui8_hall_sensors_last = ui8_hall_sensors;
@@ -655,12 +696,18 @@ hall_done:
   // weakening only in sine wave mode (the ISR may fall back to block commutation between two 10 ms ticks)
   if (ui8_motor_commutation_type == SINEWAVE_INTERPOLATION_60_DEGREES) { ui8_sinewave_table_index += ui8_fw_angle; }
   if (ui8_ad_active) { ui8_sinewave_table_index = ui8_ad_index; } // autodetect: the field is turned by hand
+  if (ui16_tone_step) // startup melody: the voltage vector flips between the axis and the opposite side
+  {
+    ui16_tone_phase += ui16_tone_step;
+    ui8_sinewave_table_index = ui8_tone_axis + ((ui16_tone_phase & 0x8000) ? 128 : 0);
+  }
 
   /****************************************************************************/
   // peak phase B current per revolution
   ui8_temp = UI8_ADC_PHASE_B_CURRENT;
   ui8_temp = (ui8_temp > PHASE_B_ZERO) ? (ui8_temp - PHASE_B_ZERO) : (PHASE_B_ZERO - ui8_temp);
   if (ui8_temp > ui8_phase_b_peak_running) { ui8_phase_b_peak_running = ui8_temp; }
+  ui8_phase_b_now = ui8_temp;
 
   // FOC: the phase B current must cross zero at a known angle. Read it there, at both zero crossings,
   // and move the angle correction until it does (Id = 0)
@@ -669,6 +716,7 @@ hall_done:
   ui8_temp = ui8_motor_rotor_angle - kt_settings.ui8_rotor_offset_angle; // angle relative to the halls
   // While field weakening the phase current leads on purpose: the correction is held at its last value.
   if ((ui16_motor_speed_erps > kt_settings.ui8_erps_interpolation) && !ui8_fw_angle &&
+      !(kt_settings.ui8_flags & KT_FLAG_NO_FOC_CORRECTION) &&
       (UI8_ADC_MOTOR_TOTAL_CURRENT > (uint8_t) (ui8_motor_total_current_offset + 2)))
   {
     if (ui8_flag_foc_read_id_current && (ui8_temp >= ui8_foc_adjust_effective))
@@ -701,25 +749,42 @@ hall_done:
     if ((ui8_adc_motor_total_current > ui8_adc_target_motor_current_max) && ui16_ad_duty) { ui16_ad_duty--; }
     ui16_duty_cycle = ui16_ad_duty;
   }
-  else if (ui8_adc_motor_total_current > ui8_adc_target_motor_current_max) // battery current limit
+  // battery current limit on the filtered current (0.125 A, 10 ms): the shunt sample of this PWM cycle is a pulse
+  // of the phase current and with a low inductance direct drive motor it was over a 5 A limit all the time at
+  // ~1 A battery current (real KT controller). The hardware over current trip stays as the fast protection.
+  else if (i16_motor_current_filtered_10b > ((int16_t) (ui8_adc_target_motor_current_max - ui8_motor_total_current_offset) << 2))
   {
     if (ui16_duty_cycle > 0) { ui16_duty_cycle--; }
   }
   // phase current = battery current / duty cycle: at low duty cycle (start up, climbing slowly) the
-  // phase current can be several times the battery current
-  else if (ui8_phase_current_limit_on && (ui8_adc_motor_total_current > ui8_motor_total_current_offset) &&
-           ((((uint16_t) (ui8_adc_motor_total_current - ui8_motor_total_current_offset)) << 8) >
-            ((uint16_t) kt_settings.ui8_phase_current_max) * ((uint8_t) (ui16_duty_cycle >> 1))))
+  // phase current can be several times the battery current. One ADC step above the offset is noise: at duty
+  // cycle 0 it made the limit true for ever, the duty cycle never left 0 and the start up ended in "motor
+  // blocked" after 2 s (real KT controller, 52 V)
+  // Below 1/8 duty cycle the battery current says nothing about the phase current: there the measured phase B
+  // current (0.121 A steps) is used instead. Above it the filtered battery current (0.125 A, 10 ms): the
+  // instantaneous shunt sample of this PWM cycle is a pulse of the phase current (DC link shunt) and with the low
+  // inductance of a direct drive motor it tripped the limit all the time - the duty cycle stayed at ~110 of 508
+  // and the motor ran rough and weak (real KT controller, 52 V).
+  // Phase B alone misses the sectors where phase B carries no current (block commutation at start up): the
+  // filtered battery current / duty cycle (at least 16 of 508, so the noise can't block the start) covers them.
+  else if (ui8_phase_current_limit_on &&
+           (((ui16_duty_cycle < (PWM_DUTY_MAX >> 3)) && (ui8_phase_b_now > ui8_phase_b_limit)) ||
+            ((i16_motor_current_filtered_10b > 0) &&
+             ((((uint16_t) i16_motor_current_filtered_10b) << 6) >
+              ((uint16_t) kt_settings.ui8_phase_current_max) *
+              ((uint8_t) (((ui16_duty_cycle < 16) ? 16 : ui16_duty_cycle) >> 1))))))
   {
     if (ui16_duty_cycle > 0) { ui16_duty_cycle--; }
   }
   // regen while the battery is full: reduce regen current
-  else if ((ui8_adc_motor_total_current < ui8_motor_total_current_offset) &&
+  else if (((uint8_t) (ui8_adc_motor_total_current + 1) < ui8_motor_total_current_offset) &&
            (UI8_ADC_BATTERY_VOLTAGE >= kt_settings.ui8_adc_battery_voltage_max))
   {
     if (ui16_duty_cycle < PWM_DUTY_MAX) { ui16_duty_cycle++; }
   }
-  else if (ui8_adc_motor_total_current < ui8_adc_target_motor_regen_current_max) // regen current limit
+  // regen current limit. One ADC step below the offset is noise: with regen 0 A it raised the duty cycle and the
+  // motor kept turning without throttle (real KT controller)
+  else if ((uint8_t) (ui8_adc_motor_total_current + 1) < ui8_adc_target_motor_regen_current_max)
   {
     if (ui16_duty_cycle < PWM_DUTY_MAX) { ui16_duty_cycle++; }
   }
@@ -760,7 +825,7 @@ hall_done:
   TIM1->CCR3L = (uint8_t) ui16_value_b;
 
   // enable PWM signals only when MOTOR_CONTROLLER_STATE_OK (and not coasting)
-  if ((ui8_motor_controller_state == MOTOR_CONTROLLER_STATE_OK) && !ui8_coasting)
+  if ((ui8_motor_controller_state == MOTOR_CONTROLLER_STATE_OK) && !ui8_coasting && !ui8_phase_fault)
   {
     TIM1->BKR |= TIM1_BKR_MOE;
   }
@@ -881,12 +946,15 @@ static uint16_t soft_speed_limit (uint16_t ui16_target_current)
   return (uint16_t) (((uint32_t) ui16_target_current * (ui16_limit_x10 - ui16_erps_x10)) / ui16_band);
 }
 
-// geared motor (freewheel) with no current requested: switch the PWM off after 400 ms. The motor spins down
-// freely instead of being held at its no load speed by the PWM (idle current, noise). Direct drive motors keep
-// the PWM on: there the current controller holds 0 A, switching off would leave the motor uncontrolled.
+// no current requested: switch the PWM off after 400 ms. The motor spins down freely instead of being held at its
+// no load speed by the PWM (idle current, noise). Direct drive motors keep the PWM on only near the battery
+// voltage (back-EMF duty cycle above ~90 %): there PWM off would let the diodes brake uncontrolled. Below it the
+// 0 A current control (0.5 A ADC steps) kept a direct drive motor turning without throttle (real KT controller).
 static void do_coasting (uint16_t ui16_target_current)
 {
-  if (settings_flag (KT_FLAG_DIRECT_DRIVE) || ui16_target_current || ui8_fw_angle ||
+  uint16_t ui16_emf_duty = (uint16_t) ((((uint32_t) ui16_motor_speed_erps * ui16_emf_duty_per_erps_x256) >> 8));
+  if ((settings_flag (KT_FLAG_DIRECT_DRIVE) && (ui16_emf_duty > (PWM_DUTY_MAX - (PWM_DUTY_MAX >> 3)))) ||
+      ui16_target_current || ui8_fw_angle ||
       motor_controller_state_is_set (MOTOR_CONTROLLER_STATE_BRAKE))
   {
     ui8_coast_counter = 0;
@@ -903,7 +971,10 @@ static void do_coasting (uint16_t ui16_target_current)
     }
     return;
   }
-  if (ui8_coast_counter < 40) { ui8_coast_counter++; return; } // 400 ms: the back-EMF constant is learned after 300 ms
+  // at once with a known back-EMF constant (needed to switch on again at speed): waiting 400 ms with the PWM on
+  // let the duty cycle ramp below the back-EMF and the motor braked hard on releasing the throttle (real motor).
+  // Without the constant 400 ms: it is learned after 300 ms of running.
+  if (ui8_coast_counter < (ui16_emf_duty_per_erps_x256 ? 1 : 40)) { ui8_coast_counter++; return; }
   if (!ui8_coasting)
   {
     ui8_coasting = 1;
@@ -1233,6 +1304,11 @@ void motor_init (void)
   EXTI_SetExtIntSensitivity(EXTI_PORT_GPIOD,
 			    EXTI_SENSITIVITY_FALL_LOW);
 
+  // phase current limit in phase B ADC steps: 0.5 A / 0.121 A = 4.13 steps per battery current step (sensor range 120)
+  {
+    uint16_t ui16_l = (((uint16_t) kt_settings.ui8_phase_current_max) * 33U) >> 3;
+    ui8_phase_b_limit = (ui16_l > 120) ? 120 : (uint8_t) ui16_l;
+  }
   // start the filters at the measured zero current and the middle battery voltage (motor_init runs after adc_init)
   ui16_adc_motor_current_accumulated_10b = ui16_motor_total_current_offset_10b << 4;
   ui16_adc_battery_voltage_accumulated = ((uint16_t) ((kt_settings.ui8_adc_battery_voltage_max +
@@ -1603,6 +1679,107 @@ void save_learned (void)
 }
 
 /****************************************************************************/
+// ionrise startup melody, played by the motor windings: the voltage vector flips at the tone frequency between
+// one phase axis and the opposite side (square wave: no torque on average, the wheel doesn't move, no hall
+// calibration needed). Every note uses the next axis (A, B, C). Phase test: phase B carries current on every
+// axis (all of it on axis B, half on A and C), an open phase leaves it at 0 on one axis -> ui8_phase_fault,
+// the PWM stays off. The duty cycle is regulated so phase B sees ~half of the phase current limit (max 7 A).
+// Brake, a hall change (wheel turned) or a fault state end it.
+
+static const uint8_t ui8_melody[9][3] = { // note Hz/16 (0 = pause), length in 5 ms, volume in 1/8
+  {49, 20, 8}, {0, 6, 0}, {65, 20, 8}, {0, 6, 0}, {82, 68, 8}, {0, 14, 0}, {98, 14, 5}, {0, 5, 0}, {131, 60, 6}};
+
+void motor_melody (void)
+{
+  static const uint8_t ui8_axis_index[3] = {64, 149, 235}; // sine table peak of phase A, B, C
+  uint8_t ui8_n;
+  uint8_t ui8_t;
+  uint8_t ui8_axis = 0;
+  uint8_t ui8_faults = 0;
+  uint8_t ui8_peak;
+  uint8_t ui8_max;
+  uint8_t ui8_tgt;
+  uint8_t ui8_halls = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
+  uint8_t ui8_hall_changes = 0;
+  uint16_t ui16_duty = 8;
+  uint16_t ui16_f;
+  uint16_t ui16_f_old = 0;
+  uint16_t ui16_start;
+  // half the phase current limit in phase B ADC steps (0.121 A): A * 0.5 / 0.121 = motor A * factor/10 * 4.13
+  uint16_t ui16_target = (((uint16_t) kt_settings.ui8_motor_current_a) * kt_settings.ui8_phase_current_factor_x10 * 53U) >> 7;
+
+#ifdef SIMULATION
+  return; // ucsim has no motor current: the phase test would block the motor in the tests
+#endif
+  if (settings_flag (KT_FLAG_NO_MELODY) || (ui8_motor_controller_state != MOTOR_CONTROLLER_STATE_OK)) { return; }
+  if (ui16_target > 30) { ui16_target = 30; }   // ~3.6 A: torque ripple (the rotor must not move)
+  if (ui16_target < 12) { ui16_target = 12; }   // ~1.5 A: enough for the phase test
+  ui8_coasting = 0;
+  ui16_ad_duty = 0;
+  ui8_ad_active = 1;
+  for (ui8_n = 0; ui8_n < 9; ui8_n++)
+  {
+    ui16_f = ((uint16_t) ui8_melody[ui8_n][0]) * 16;
+    ui8_max = 0;
+    ui8_tgt = (uint8_t) ((ui16_target * ui8_melody[ui8_n][2]) >> 3);
+    if (ui8_axis != 1) { ui8_tgt >>= 1; } // axis A or C: phase B carries half
+    if (ui16_f)
+    {
+      if (ui16_f_old) { ui16_duty = (uint16_t) (((uint32_t) ui16_duty * ui16_f) / ui16_f_old); } // inductive
+      ui16_f_old = ui16_f;
+      ui8_tone_axis = ui8_axis_index[ui8_axis];
+      // start a quarter period in: the first half wave is half as long, so the current (a triangle) is centred on
+      // 0. Starting at 0 gave it a DC part along the axis that pulled the rotor; with the axis moving 120 deg per
+      // note the rotor stepped round like a stepper motor and the wheel started turning (real motor)
+      ui16_tone_phase = 0x4000;
+      ui16_tone_step = (uint16_t) ((((uint32_t) ui16_f) * 537U) >> 7); // 65536 / 15625 Hz PWM rate
+    }
+    else
+    {
+      ui16_tone_step = 0;
+    }
+    for (ui8_t = 0; ui8_t < ui8_melody[ui8_n][1]; ui8_t++)
+    {
+      if (ui16_duty > 150) { ui16_duty = 150; }
+      ui16_ad_duty = ui16_f ? ui16_duty : 0;
+      ui16_start = TIM2_GetCounter ();
+      while ((uint16_t) (TIM2_GetCounter () - ui16_start) < 39) { ; } // 5 ms
+      ui8_peak = ui8_phase_b_peak_running;
+      ui8_phase_b_peak_running = 0;
+      if (ui16_f && (ui8_t > 1))
+      {
+        if (ui8_peak > ui8_max) { ui8_max = ui8_peak; }
+        if (ui8_peak < ui8_tgt) { ui16_duty += (ui16_duty >> 3) + 1; }
+        else { ui16_duty -= ui16_duty >> 3; }
+      }
+      // wheel turned: a second hall change (one change can be the rotor twitching at a hall edge)
+      {
+        uint8_t ui8_h = ((uint8_t) HALL_SENSORS__PORT->IDR) & (HALL_SENSORS_MASK);
+        if (ui8_h != ui8_halls) { ui8_halls = ui8_h; ui8_hall_changes++; }
+      }
+      if (brake_is_set () || (ui8_motor_controller_state != MOTOR_CONTROLLER_STATE_OK) || (ui8_hall_changes > 1))
+      {
+        ui8_faults = 0;
+        goto end;
+      }
+    }
+    if (ui16_f)
+    {
+      if (ui8_max < 4) { ui8_faults |= (uint8_t) (1 << ui8_axis); } // < 0.5 A: open phase / dead MOSFET
+      if (++ui8_axis > 2) { ui8_axis = 0; }
+    }
+  }
+end:
+  ui16_tone_step = 0;
+  ui16_ad_duty = 0;
+  ui8_ad_active = 0;
+  ui16_duty_cycle = 0;
+  ui16_duty_cycle_target = 0;
+  ui8_phase_fault = ui8_faults;
+  if (ui8_faults) { TIM1->BKR &= (uint8_t) ~TIM1_BKR_MOE; }
+}
+
+/****************************************************************************/
 // Hall autodetect (started by the setup app: it writes 1 into ui8_ad_cmd over SWIM).
 // The sine output is turned slowly with a small voltage, the rotor's magnet follows the field: the rotor angle
 // is the sine table index - 64. At every hall edge the angle is recorded, forward and backward. The rotor lags
@@ -1611,8 +1788,9 @@ void save_learned (void)
 // Result: rotor offset (replaces the 202 of the settings) and the 6 edge offsets, saved in the EEPROM.
 
 #define AD_STEP_TICKS 31        // 31 x 128 us = 4 ms per 1/256 turn: 1 electrical turn per second
-#define AD_TARGET_PEAK 20       // phase B current ~2.4 A (0.121 A per step)
-#define AD_DUTY_MAX 60          // of 508: limits the voltage even if the current sensor reads nothing
+#define AD_TARGET_PEAK 45       // phase B current ~5.4 A (0.121 A per step). 2.4 A was too little for a big direct drive
+                                // motor: the rotor jumped from cogging step to cogging step (edges in pairs, spread 66 deg)
+#define AD_DUTY_MAX 120         // of 508: limits the voltage even if the current sensor reads nothing
 
 static uint8_t ui8_ad_peak = 0;
 
@@ -1699,14 +1877,16 @@ void motor_autodetect (void)
   ui16_ad_duty = 2;
   ui8_ad_peak = 0;
   ui8_ad_index = (uint8_t) (ui8_motor_rotor_absolute_angle + 64); // start at the field the rotor is at
-  ui8_ad_state = 1;
+  ui8_ad_state = 2;
   ui8_ad_active = 1;
 
-  ad_sweep (1, 256, 0, 0);      // one turn: the rotor locks to the field, the current settles
-  ad_sweep (1, 512, 1, 0);      // 2 turns forward, recorded
-  ui8_ad_state = 2;
-  ad_sweep (-1, 128, 0, 45);    // half a turn back: the lag changes side
-  ad_sweep (-1, 512, 2, 50);    // 2 turns backward, recorded
+  // backwards first: a geared hub's freewheel lets the motor turn freely without the wheel, and the apps ask
+  // "first backwards, then forwards?" (forwards the wrong way = the phase/hall wiring is swapped)
+  ad_sweep (-1, 256, 0, 0);     // one turn: the rotor locks to the field, the current settles
+  ad_sweep (-1, 512, 2, 0);     // 2 turns backward, recorded
+  ui8_ad_state = 1;
+  ad_sweep (1, 128, 0, 45);     // half a turn forward: the lag changes side
+  ad_sweep (1, 512, 1, 50);     // 2 turns forward, recorded
 
   ui8_ad_active = 0;
   ui16_duty_cycle = 0;

@@ -60,6 +60,7 @@ void motor_init (void); // must be called before using the motor
 void motor_controller (void); // every 100 ms
 void motor_fast_controller (void); // every 10 ms
 void motor_autodetect (void); // main loop: runs the hall autodetect when the app asked for it
+void motor_melody (void);     // once at power up: startup melody + phase test (~1 s)
 void motor_enable_PWM (void);
 void motor_disable_PWM (void);
 void motor_set_pwm_duty_cycle_target (uint16_t value); // 0 ... 508

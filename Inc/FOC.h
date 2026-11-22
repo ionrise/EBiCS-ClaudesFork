@@ -43,7 +43,6 @@ extern char PI_flag;
 
 
 
-extern q31_t e_log[300][6];
 extern char Obs_flag;
 extern uint8_t ui8_debug_state;
 

@@ -291,7 +291,7 @@ void main() {
     expect(find.text('KT settings'), findsOneWidget);
     await tester.tap(find.text('Expert'));
     await tester.pumpAndSettle();
-    expect(find.text('Learn hall sensor positions'), findsOneWidget);
+    expect(find.text('Hall sensor angle offset'), findsOneWidget); // first expert field (the list is lazy)
     await tester.pageBack();
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('Change controller'));

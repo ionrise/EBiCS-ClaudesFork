@@ -43,6 +43,8 @@
 #define KT_FLAG_NO_PHASE_CURRENT_LIMIT  0x08
 #define KT_FLAG_NO_HALL_LEARNING        0x10
 #define KT_FLAG_FW_THROTTLE_ONLY        0x20 // field weakening only with the throttle, not with PAS alone
+#define KT_FLAG_NO_MELODY               0x40 // no startup melody (and no phase test)
+#define KT_FLAG_NO_FOC_CORRECTION       0x80 // fixed angle (rotor offset only), no FOC angle correction
 
 typedef struct
 {

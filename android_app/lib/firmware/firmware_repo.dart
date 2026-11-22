@@ -54,7 +54,7 @@ class FirmwareRepo {
 
   Future<FirmwareVariant?> variantFor(BikeSettings s) async {
     for (final v in await variants()) {
-      if (v.display == s.display && v.sensorless == s.sensorless) return v;
+      if (v.display == s.displayType.key && v.sensorless == s.sensorless) return v; // unknown (removed) display -> first
     }
     return null;
   }

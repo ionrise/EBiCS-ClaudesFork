@@ -138,7 +138,6 @@ DISPLAYS = [
     ("VESC", "DISPLAY_TYPE_VESC", "VESC UART (115200 baud)  (new)",
      "Live data for VESC displays and apps (via a UART-BLE bridge). Not a full VESC: no VESC Tool configuration."),
     ("EBICS", "DISPLAY_TYPE_EBiCS", "EBiCS app / BLE module", "For the EBiCS Flutter app with the EBiCS BLE module."),
-    ("DEBUG", "DISPLAY_TYPE_DEBUG", "No display (debug text on UART)", "Prints debug values at 56000 baud."),
 ]
 
 WHEELS = [("16\"", 1270), ("20\"", 1590), ("24\"", 1900), ("26\"", 2070), ("27.5\"", 2200),
@@ -231,6 +230,20 @@ FIELDS = [
     ("fw_voltage_pct", "Field weakening: voltage use", "int", 90, "expert", "%",
      "The weakening keeps the voltage the current control needs at this % of the maximum (VESC: duty start). "
      "Lower = more headroom and more weakening, higher = weakening starts later."),
+    ("assist_1_pct", "Assist level 1", "int", 20, "advanced", "%",
+     "Phase current of display assist level 1 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level."),
+    ("assist_2_pct", "Assist level 2", "int", 40, "advanced", "%",
+     "Phase current of display assist level 2 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level."),
+    ("assist_3_pct", "Assist level 3", "int", 60, "advanced", "%",
+     "Phase current of display assist level 3 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level."),
+    ("assist_4_pct", "Assist level 4", "int", 80, "advanced", "%",
+     "Phase current of display assist level 4 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level."),
+    ("assist_5_pct", "Assist level 5", "int", 100, "advanced", "%",
+     "Phase current of display assist level 5 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level."),
+    ("melody_pct", "Startup melody volume", "int", 50, "advanced", "%",
+     "The motor plays the ionrise melody at power-up (~1 s, the wheel doesn't move) and checks the 3 motor phases: "
+     "an open phase wire or a dead MOSFET is reported and the motor stays off. Peak current in % of the phase "
+     "current, 0 = off (no phase test then). Interrupted by the brake or by turning the wheel."),
     ("linear_regen", "Proportional regen on AD2", "bool", False, "advanced", "", "Analog brake sensor on AD2."),
     ("voltage_ramp_v", "Soft voltage ramp width", "float", 1.0, "advanced", "V",
      "Current is reduced smoothly within this voltage above the cutoff (motor) and below the full charge voltage (regen)."),
@@ -252,7 +265,6 @@ FIELDS = [
     ("trigger_default", "ADC trigger default", "int", 2020, "expert", "", ""),
     ("timer_period", "PWM timer period", "int", 2028, "expert", "", ""),
     ("disable_dyn_adc", "Fixed ADC trigger", "bool", False, "expert", "", ""),
-    ("fast_loop_log", "Fast loop logging", "bool", False, "expert", "", ""),
     ("cal_bat_v", "Battery voltage cal.", "int", 256, "expert", "", ""),
     ("cal_v", "Voltage cal. (mV/count)", "int", 25, "expert", "", ""),
     ("cal_i", "Current cal. (mA/count <<8)", "str", "38LL<<8", "expert", "", "Depends on the shunt resistor."),
@@ -270,8 +282,6 @@ FIELDS = [
      "+90 aligns the observer with the open loop start direction (checked in tools/motor_sim.py; -90 also runs but "
      "reverses after the start). Fine tune in small steps (+-10) for smooth running. Wrong way: 'Reverse motor direction'."),
     ("spec_angle", "Hall angle offset (unused)", "str", "-715827882", "expert", "", ""),
-    ("autodetect_at_boot", "Autodetect at every power-up", "bool", False, "expert", "",
-     "Only with the debug display. The app starts calibration over the ST-Link instead."),
 ]
 
 FIELD_BY_KEY = {f[0]: f for f in FIELDS}
@@ -288,6 +298,10 @@ def load_settings():
             s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
+    if s.get("display") not in [d[0] for d in DISPLAYS]:
+        s["display"] = DISPLAYS[0][0]  # e.g. the removed debug display
+    for k in ("fast_loop_log", "autodetect_at_boot"):
+        s.pop(k, None)
     return s
 
 
@@ -312,14 +326,14 @@ def import_java_ini(path):
              gear_ratio=int(v[36]), speed_limit=int(v[37]), pulses_per_rev=max(1, int(v[38])),
              phase_current_a=f(39) / 1000.0, battery_current_a=f(40) / 1000.0, regen_current_a=f(41) / 1000.0,
              regen_max_a=f(42) / 1000.0, voltage_min_v=f(43) / 1000.0, full_voltage_v=f(44) / 1000.0, spec_angle=v[45],
-             dirdet=b(46), torque_sensor=b(47), torque_on_ad1=b(48), disable_dyn_adc=b(57), fast_loop_log=b(58),
+             dirdet=b(46), torque_sensor=b(47), torque_on_ad1=b(48), disable_dyn_adc=b(57),
              pll=b(59), speed_throttle=b(60), linear_regen=b(61), speed_sensor_external=b(62),
-             autodetect_at_boot=b(63), reverse=b(64), legal_mode=b(65), throttle=b(66), individual_profile=b(67))
+             reverse=b(64), legal_mode=b(65), throttle=b(66), individual_profile=b(67))
     # battery cell count from the 'voltage max' setting (about 4.2 V per cell)
     cells = round(f(44) / 4200.0)
     s["battery"] = min((c for _, c in BATTERIES), key=lambda c: abs(c - cells))
     for idx, key in ((49, "JLCD"), (50, "KM5S"), (51, "EBICS"), (52, "KUNTENG"), (53, "BAFANG_LCD"),
-                     (54, "BAFANG_TFT"), (55, "NO2"), (56, "DEBUG")):
+                     (54, "BAFANG_TFT"), (55, "NO2")):
         if b(idx):
             s["display"] = key
     return s
@@ -374,6 +388,11 @@ def check_settings(s):
         p.append("Field weakening battery current must not be negative.")
     if not 1 <= int(s.get("fw_ramp_ms", 500)) <= 10000:
         p.append("Field weakening ramp must be 1 ... 10000 ms.")
+    for n in range(1, 6):
+        if not 0 <= int(s.get(f"assist_{n}_pct", 20 * n)) <= 100:
+            p.append(f"Assist level {n} must be 0 ... 100 %.")
+    if not 0 <= int(s.get("melody_pct", 50)) <= 100:
+        p.append("Startup melody volume must be 0 ... 100 %.")
     if not 50 <= int(s.get("fw_voltage_pct", 90)) <= 98:
         p.append("Field weakening voltage use must be 50 ... 98 %.")
     return p
@@ -391,7 +410,6 @@ def generate_config_h(s):
     L = ["/*", " * config.h", " *", " *  Automatically created by EBiCS Setup (setup_app/ebics_setup.py)",
          " *  Edit the settings in the app, changes here are overwritten.", " */", "",
          "#ifndef CONFIG_H_", "#define CONFIG_H_", '#include "stdint.h"',
-         "#define DISPLAY_TYPE_DEBUG (1<<0)            // ASCII output in debug mode",
          "#define DISPLAY_TYPE_KUNTENG (1<<1)          // Kunteng display",
          "#define DISPLAY_TYPE_BAFANG_LCD (1<<2)       // Bafang LCD, 1200 baud",
          "#define DISPLAY_TYPE_BAFANG_850_860 (1<<3)   // Bafang 850/860, 9600 baud",
@@ -426,6 +444,7 @@ def generate_config_h(s):
     d("CURRENT_RAMP_MS", max(0, min(10000, int(s.get("current_ramp_ms", 300)))))
     d("FW_CURRENT_MAX", units(s.get("fw_current_a", 0) or 0)); d("FW_BATTERY_CURRENT_MAX", ma(s.get("fw_battery_a", 0) or 0))
     d("FW_RAMP_MS", max(1, min(10000, int(s.get("fw_ramp_ms", 500))))); d("FW_VOLTAGE_PCT", max(50, min(98, int(s.get("fw_voltage_pct", 90) or 90))))
+    d("MELODY_PCT", max(0, min(100, int(s.get("melody_pct", 50)))))
     d("BATTERYVOLTAGE_MIN", cutoff); d("BATTERYVOLTAGE_MAX", vmax)
     d("VOLTAGE_RAMP_MV", max(100, int(float(s.get("voltage_ramp_v", 1.0)) * 1000)))
     d("MOTOR_TEMPERATURE_THRESHOLD", int(s.get("motor_temp_derate", 100)))
@@ -447,12 +466,10 @@ def generate_config_h(s):
     flag(s["torque_on_ad1"], "#define TQONAD1")
     d("DISPLAY_TYPE", display_define)
     flag(s["disable_dyn_adc"], "#define DISABLE_DYNAMIC_ADC")
-    flag(s["fast_loop_log"], "#define FAST_LOOP_LOG")
     d("SPEED_PLL", 1 if s["pll"] else 0)
     flag(s["speed_throttle"], "#define SPEEDTHROTTLE")
     flag(s["linear_regen"], "#define ADC_BRAKE")
     d("SPEEDSOURCE", "EXTERNAL" if (s["speed_sensor_external"] or speed_from_wire) else "INTERNAL")
-    d("AUTODETECT", 1 if (s["autodetect_at_boot"] and s["display"] == "DEBUG" and not s.get("sensorless")) else 0)
     d("REVERSE", -1 if s["reverse"] else 1)
     flag(s["legal_mode"], "#define LEGALFLAG")
     flag(s["throttle"], "#define THROTTLE_OVERRIDE")
@@ -482,7 +499,8 @@ SETTINGS_FIELDS = ["ph_current_max", "battery_current_max", "regen_current", "re
                    "motor_temp_threshold", "motor_temp_max", "frac_high", "frac_low", "reverse",
                    "speed_temp_adc", "speed_temp_threshold", "ntc_pullup_ohm",
                    "obs_inductance", "obs_resistance", "obs_flux_linkage", "obs_gamma", "obs_angle_offset",
-                   "current_ramp_ms", "fw_current_max", "fw_battery_current_max", "fw_ramp_ms", "fw_voltage_pct"]
+                   "current_ramp_ms", "fw_current_max", "fw_battery_current_max", "fw_ramp_ms", "fw_voltage_pct", "melody_pct",
+                   "assist_pct_lo", "assist_pct_hi"]
 
 
 def _c_int(v):
@@ -526,7 +544,12 @@ def settings_block_values(s):
          "fw_current_max": max(0, min(4000, units(s.get("fw_current_a", 0) or 0))),
          "fw_battery_current_max": max(0, ma(s.get("fw_battery_a", 0) or 0)),
          "fw_ramp_ms": max(1, min(10000, int(s.get("fw_ramp_ms", 500)))),
-         "fw_voltage_pct": max(50, min(98, int(s.get("fw_voltage_pct", 90) or 90)))}
+         "fw_voltage_pct": max(50, min(98, int(s.get("fw_voltage_pct", 90) or 90))),
+         "melody_pct": max(0, min(100, int(s.get("melody_pct", 50))))}
+    # assist levels 1..5 in %, bytes 180..184 of the block (uint8_t assist_pct[8]): packed into two int32 fields
+    ap = [max(0, min(100, int(s.get(f"assist_{n}_pct", 20 * n)))) for n in range(1, 6)]
+    v["assist_pct_lo"] = ap[0] | (ap[1] << 8) | (ap[2] << 16) | (ap[3] << 24)
+    v["assist_pct_hi"] = ap[4]
     for n, mv in enumerate(bars, 1):
         v[f"battery_level_{n}"] = mv * 10
     return flags, v
@@ -733,6 +756,7 @@ LIVE_VARS = {
     "ui8_motor_temp_sensor_ok": ("u8", 0),
     "ui8_sensorless_running": ("u8", 0),
     "i32_fw_id": ("i32", 0),
+    "ui8_phase_fault": ("u8", 0),
     "i16_oc_capture": ("i16", 0),
 }
 MS_FIELDS = {"Voltage": ("i32", 0), "Speed": ("u32", 4), "i_q": ("i32", 12), "i_q_setpoint": ("i32", 16),
@@ -850,6 +874,15 @@ def hall_directions_deg(snap):
         fd, bd = f * 360.0 / 2 ** 32, b * 360.0 / 2 ** 32
         out.append((fd, bd, (bd - fd + 180) % 360 - 180))
     return out
+
+
+def phase_fault_text(fault, s):
+    """Live view text for ui8_phase_fault (phase test of the startup melody)."""
+    if not int(s.get("melody_pct", 50) or 0):
+        return "not tested (melody off)"
+    if not fault:
+        return "OK"
+    return "FAULT axis " + "/".join("ABC"[i] for i in range(3) if fault & (1 << i)) + " - check phase wires / MOSFETs"
 
 
 def hall_spread_text(snap):

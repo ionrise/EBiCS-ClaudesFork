@@ -66,11 +66,16 @@ FIELDS = [
      "Switch this if the motor only assists when pedalling backwards."),
     ("pas_max_cadence", "Cadence for full PAS power", "int", 90, "advanced", "rpm",
      "At this pedal cadence PAS gives the full power of the assist level."),
-    ("assist_1", "Assist level 1", "float", 0.2, "advanced", "x", "Power factor of display level 1 (0 ... 1)."),
-    ("assist_2", "Assist level 2", "float", 0.4, "advanced", "x", "Power factor of display level 2 (0 ... 1)."),
-    ("assist_3", "Assist level 3", "float", 0.6, "advanced", "x", "Power factor of display level 3 (0 ... 1)."),
-    ("assist_4", "Assist level 4", "float", 0.8, "advanced", "x", "Power factor of display level 4 (0 ... 1)."),
-    ("assist_5", "Assist level 5", "float", 1.0, "advanced", "x", "Power factor of display level 5 (0 ... 1)."),
+    ("assist_1", "Assist level 1", "int", 20, "advanced", "%",
+     "Power of display level 1 in % of the max motor current (throttle and PAS)."),
+    ("assist_2", "Assist level 2", "int", 40, "advanced", "%",
+     "Power of display level 2 in % of the max motor current (throttle and PAS)."),
+    ("assist_3", "Assist level 3", "int", 60, "advanced", "%",
+     "Power of display level 3 in % of the max motor current (throttle and PAS)."),
+    ("assist_4", "Assist level 4", "int", 80, "advanced", "%",
+     "Power of display level 4 in % of the max motor current (throttle and PAS)."),
+    ("assist_5", "Assist level 5", "int", 100, "advanced", "%",
+     "Power of display level 5 in % of the max motor current (throttle and PAS)."),
     ("ramp_s", "Power ramp (time to full power)", "float", 0.4, "advanced", "s",
      "How fast the power comes up when you press the throttle or start pedalling. 0.4 s is the old behaviour of "
      "the S06S, longer is gentler on the gears."),
@@ -94,6 +99,9 @@ FIELDS = [
      "allowed any more (brake, over a limit) it goes back 2x faster."),
     ("fw_throttle_only", "Field weakening only with the throttle", "bool", False, "advanced", "",
      "Tick to use field weakening only while the throttle is pressed, not with PAS alone."),
+    ("melody", "Startup melody + phase test", "bool", True, "advanced", "",
+     "The motor plays the ionrise melody at power-up (~1 s, the wheel doesn't move) and checks the 3 motor phases: "
+     "an open phase wire or a dead MOSFET keeps the motor off. Interrupted by the brake or by turning the wheel."),
     # expert
     ("rotor_offset_angle", "Hall sensor angle offset", "int", 202, "expert", "/256",
      "Angle between the hall sensors and the rotor (256 = 360 deg). 202 fits the Q85/Q100 geared motors. "
@@ -106,6 +114,12 @@ FIELDS = [
      "Delay of the phase current measurement. The FOC sample angle is moved by the angle the rotor turns in this "
      "time, so the angle correction is right at every speed. 0 = off (old behaviour). Signed: the right sign and "
      "size depend on the controller (in the motor simulator about -40 us). Tune it with Live data on the bike."),
+    ("phase_current_factor_x10", "Phase current limit (x battery current)", "int", 25, "expert", "x0.1",
+     "Phase current limit as a multiple of the max motor current, in tenths: 25 = 2.5 x. At low speed the phase "
+     "current is higher than the battery current."),
+    ("foc_correction", "Automatic FOC angle correction", "bool", True, "expert", "",
+     "Moves the angle until the phase B current crosses zero at the FOC sample angle. Untick to drive with the "
+     "fixed hall angle only (try it if the motor runs rough and the correction wanders)."),
     ("phase_current_limit", "Limit phase current at low speed", "bool", True, "expert", "",
      "Also limits the motor phase current (estimated from battery current and duty cycle). Protects the "
      "MOSFETs when starting under load."),
@@ -127,7 +141,7 @@ def load_settings():
             s.update(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
         except (OSError, ValueError):
             pass
-    return s
+    return migrate_settings(s)
 
 
 def save_settings(s):
@@ -148,8 +162,8 @@ def check_settings(s):
     if not 30 <= int(s["pas_max_cadence"]) <= 150:
         p.append("Cadence for full PAS power must be 30 ... 150 rpm.")
     for i in range(1, 6):
-        if not 0.0 <= float(s[f"assist_{i}"]) <= 1.0:
-            p.append(f"Assist level {i} must be between 0 and 1.")
+        if not 0 <= assist_pct(s[f"assist_{i}"]) <= 100:
+            p.append(f"Assist level {i} must be 0 ... 100 %.")
     if not 5 <= int(s["max_speed"]) <= 70:
         p.append("Speed limit must be 5 ... 70 km/h.")
     for k in ("rotor_offset_angle", "foc_angle_adjust"):
@@ -193,7 +207,7 @@ def defines(s):
         "MOTOR_ROTOR_ERPS_START_INTERPOLATION_60_DEGREES=%d" % int(s["erps_interpolation"]),
     ]
     for i in range(1, 6):
-        d.append("PAS_ASSIST_LEVEL_%d=%s" % (i, repr(float(s[f"assist_{i}"]))))
+        d.append("PAS_ASSIST_LEVEL_%d=%s" % (i, repr(assist_pct(s[f"assist_{i}"]) / 100.0)))
     if s["over_voltage_protection"]:
         d.append("BATTERY_OVER_VOLTAGE_PROTECTION")
     if not s.get("phase_current_limit", True):
@@ -212,7 +226,7 @@ SETTINGS_BLOCK_ADDR = 0x4080
 SETTINGS_BLOCK_LEN = 32
 SETTINGS_BLOCK_VERSION = 1
 FLAG_DIRECT_DRIVE, FLAG_PAS_LEFT, FLAG_OVER_VOLTAGE, FLAG_NO_PHASE_LIMIT, FLAG_NO_HALL_LEARNING = 1, 2, 4, 8, 16
-FLAG_FW_THROTTLE_ONLY = 32
+FLAG_FW_THROTTLE_ONLY, FLAG_NO_MELODY, FLAG_NO_FOC_CORRECTION = 32, 64, 128
 
 
 def settings_block(s):
@@ -222,7 +236,9 @@ def settings_block(s):
              (FLAG_OVER_VOLTAGE if s["over_voltage_protection"] else 0) |
              (0 if s.get("phase_current_limit", True) else FLAG_NO_PHASE_LIMIT) |
              (0 if s.get("hall_learning", True) else FLAG_NO_HALL_LEARNING) |
-             (FLAG_FW_THROTTLE_ONLY if s.get("fw_throttle_only", False) else 0))
+             (FLAG_FW_THROTTLE_ONLY if s.get("fw_throttle_only", False) else 0) |
+             (0 if s.get("melody", True) else FLAG_NO_MELODY) |
+             (0 if s.get("foc_correction", True) else FLAG_NO_FOC_CORRECTION))
     b = bytearray(SETTINGS_BLOCK_LEN)
     b[0:4] = bytes([ord("K"), ord("T"), SETTINGS_BLOCK_VERSION, SETTINGS_BLOCK_LEN])
     b[4] = int(s["cells"])
@@ -233,7 +249,7 @@ def settings_block(s):
     b[9] = int(s["pas_magnets"])
     b[10] = int(s["pas_max_cadence"])
     for i in range(5):
-        b[11 + i] = int(round(float(s[f"assist_{i + 1}"]) * 100))
+        b[11 + i] = max(0, min(100, assist_pct(s.get(f"assist_{i + 1}", 20 * (i + 1)))))
     b[16] = int(s["rotor_offset_angle"]) & 0xFF
     b[17] = int(s["foc_angle_adjust"]) & 0xFF
     b[18] = int(s["erps_interpolation"])
@@ -251,6 +267,20 @@ def settings_block(s):
     b[30] = int(s.get("fw_ramp_dps", 30))
     b[31] = (~sum(b[:31])) & 0xFF
     return bytes(b)
+
+
+def assist_pct(v):
+    """Assist level in % (0 ... 100)."""
+    return int(round(float(v)))
+
+
+def migrate_settings(s):
+    """Settings saved before had the assist levels as a factor 0 ... 1: convert to %."""
+    vals = [s.get(f"assist_{i}") for i in range(1, 6)]
+    if all(isinstance(v, (int, float)) for v in vals) and max(float(v) for v in vals) <= 1.0 and             any(isinstance(v, float) for v in vals):
+        for i in range(1, 6):
+            s[f"assist_{i}"] = int(round(float(s[f"assist_{i}"]) * 100))
+    return s
 
 
 def find_compiler():
@@ -354,8 +384,8 @@ def describe_probe(i):
     if not i["probe"]:
         return "ST-Link NOT found or not usable. " + (i["error"] or "")
     if not i["target"]:
-        return ("ST-Link found, but the KT controller does not answer. Check the 4 wires (3.3V, SWIM, GND, RST) "
-                "and that the controller is powered from the battery." + (f"  ({i['error']})" if i["error"] else ""))
+        return ("ST-Link found, but the KT controller does not answer. Check the wires (SWIM and GND, 3.3V and RST "
+                "are optional) and that the controller is switched on with the battery." + (f"  ({i['error']})" if i["error"] else ""))
     if i["locked"]:
         return "Controller found - chip is LOCKED (original KT firmware). Unlock it before installing."
     return "Controller found - chip is unlocked, ready to install."

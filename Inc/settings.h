@@ -78,7 +78,9 @@ typedef struct {
 	int32_t fw_battery_current_max; // 164  field weakening: battery current limit while weakening, mA, 0 = battery_current_max
 	int32_t fw_ramp_ms;             // 168  field weakening: ms from 0 to fw_current_max, 0 = 500 ms
 	int32_t fw_voltage_pct;         // 172  field weakening: voltage use kept for the current control, %, 0 = 90 %
-	uint32_t reserved[19];          // 176  0
+	int32_t melody_pct;             // 176  startup melody volume, % of ph_current_max, 0 = off (MELODY_PCT)
+	uint8_t assist_pct[8];          // 180  phase current of assist levels 1..5 in % (bytes 5..7: 0), 0 = 20 % per level
+	uint32_t reserved[16];          // 188  0
 	uint32_t crc;                   // 252  CRC-32 (IEEE, like zlib) of bytes 0..251
 } ebics_settings_t;
 
@@ -87,6 +89,7 @@ extern volatile uint8_t ui8_settings_source;     // 0 = config.h, 1 = flash bloc
 
 void settings_load(void);
 uint32_t settings_crc32(const uint8_t *data, uint32_t len);
+uint8_t assist_from_level(uint8_t ui8_level);     // display level 1..5 -> 0..255 (RS.assist_pct)
 
 #define RS_FLAG(f) ((RS.flags & (f)) != 0)
 

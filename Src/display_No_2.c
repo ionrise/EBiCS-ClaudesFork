@@ -24,7 +24,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "main.h"
 #include "display_No_2.h"
 #include "stm32f1xx_hal.h"
-#include "print.h"
 
 
 

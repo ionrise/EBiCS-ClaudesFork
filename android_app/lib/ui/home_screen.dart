@@ -28,7 +28,7 @@ class HomeScreen extends StatelessWidget {
           ),
         );
     return Scaffold(
-      appBar: AppBar(title: const Text('EBiCS Setup'), actions: [
+      appBar: AppBar(title: const Text('IonRiseSetApp'), actions: [
         IconButton(
           icon: const Icon(Icons.swap_horiz),
           tooltip: 'Change controller',
@@ -38,13 +38,22 @@ class HomeScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
+          Center(
+            child: Image.asset(
+              theme.brightness == Brightness.dark
+                  ? 'assets/branding/ionrise_logo_white.png'
+                  : 'assets/branding/ionrise_logo.png',
+              height: 90,
+            ),
+          ),
+          const SizedBox(height: 12),
           Row(children: [
             ClipRRect(
               borderRadius: BorderRadius.circular(12),
-              child: Image.asset('assets/ebics_logo.png', width: 64, height: 64),
+              child: Image.asset('assets/ebics_logo.png', width: 48, height: 48),
             ),
             const SizedBox(width: 14),
-            Expanded(child: Text('Lishui controller setup', style: theme.textTheme.headlineSmall)),
+            Expanded(child: Text('Lishui controller setup (EBiCS)', style: theme.textTheme.titleLarge)),
           ]),
           const SizedBox(height: 6),
           const Text('Unlock the chip, install the open source EBiCS firmware, calibrate the motor and test everything '

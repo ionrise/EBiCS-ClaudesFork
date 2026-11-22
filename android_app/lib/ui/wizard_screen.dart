@@ -519,7 +519,7 @@ class _CalibrateStep extends StatefulWidget {
 }
 
 class _CalibrateStepState extends State<_CalibrateStep> {
-  final _checks = [false, false, false];
+  final _checks = [false];
   bool _running = false;
   String _status = '';
   String _detail = '';
@@ -612,7 +612,7 @@ class _CalibrateStepState extends State<_CalibrateStep> {
         _set('Starting ...', Tone.busy);
       case 1:
         _set('1/2  Finding the hall sensor positions ...', Tone.busy,
-            'The motor turns slowly forward and back and may click or buzz - that is normal. About 12 seconds.');
+            'The motor turns slowly backwards first, then forwards, and may click or buzz - that is normal. About 12 seconds.');
         setState(() => _progress = prog / 100);
       case 2:
         _set('2/2  Measuring the motor speed ...', Tone.busy,
@@ -679,14 +679,10 @@ class _CalibrateStepState extends State<_CalibrateStep> {
         ]),
       ]);
     }
-    const texts = [
-      'The wheel is lifted and can spin freely',
-      'Nothing touches the wheel, chain or pedals',
-      'Hands and cables are away from the wheel',
-    ];
+    const texts = [calCheckText];
     return _Page([
-      _p(context, "The controller now finds the position of the motor's hall sensors and measures the motor. Before you start:"),
-      for (var i = 0; i < 3; i++)
+      _p(context, "The controller now finds the position of the motor's hall sensors and measures the motor. $warnFirstBack"),
+      for (var i = 0; i < texts.length; i++)
         CheckboxListTile(
           contentPadding: EdgeInsets.zero,
           value: _checks[i],
@@ -747,12 +743,13 @@ class _DirectionStepState extends State<_DirectionStep> {
     return _Page([
       _p(
           context,
-          s.sensorless || !s.b('throttle')
+          s.sensorless
               ? 'Give the motor a short spin (throttle, or turn the pedals with the wheel lifted). Which way did the wheel turn?'
-              : 'During the calibration the wheel spun up. Which way did it turn?'),
+              : 'During the calibration: did the motor first turn backwards and then forwards?'),
       Wrap(spacing: 12, children: [
-        FilledButton(onPressed: () => _answer(true), child: const Text('Forward (correct)')),
-        OutlinedButton(onPressed: () => _answer(false), child: const Text('Backward')),
+        FilledButton(
+            onPressed: () => _answer(true), child: Text(s.sensorless ? 'Forward (correct)' : 'Yes, backwards first')),
+        OutlinedButton(onPressed: () => _answer(false), child: Text(s.sensorless ? 'Backward' : 'No, forwards first')),
       ]),
       StatusLine(_status, tone: _tone),
     ]);

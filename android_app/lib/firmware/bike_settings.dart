@@ -33,7 +33,6 @@ const displays = [
   DisplayType('VESC', 'VESC UART (115200 baud) (new)',
       'Live data for VESC displays and apps (via a UART-BLE bridge). Not a full VESC: no VESC Tool configuration.'),
   DisplayType('EBICS', 'EBiCS app / BLE module', 'For the EBiCS Flutter app with the EBiCS BLE module.'),
-  DisplayType('DEBUG', 'No display (debug text on UART)', 'Prints debug values at 56000 baud.'),
 ];
 
 const wheels = <(String, int?)>[
@@ -135,6 +134,20 @@ const fields = <Field>[
       help: 'Time from 0 to the max field weakening current.'),
   Field('fw_voltage_pct', 'Field weakening: voltage use', FieldKind.integer, 90, 'expert', unit: '%',
       help: 'The weakening keeps the voltage the current control needs at this % of the maximum (VESC: duty start).'),
+  Field('assist_1_pct', 'Assist level 1', FieldKind.integer, 20, 'advanced', unit: '%',
+      help: 'Phase current of display assist level 1 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level.'),
+  Field('assist_2_pct', 'Assist level 2', FieldKind.integer, 40, 'advanced', unit: '%',
+      help: 'Phase current of display assist level 2 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level.'),
+  Field('assist_3_pct', 'Assist level 3', FieldKind.integer, 60, 'advanced', unit: '%',
+      help: 'Phase current of display assist level 3 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level.'),
+  Field('assist_4_pct', 'Assist level 4', FieldKind.integer, 80, 'advanced', unit: '%',
+      help: 'Phase current of display assist level 4 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level.'),
+  Field('assist_5_pct', 'Assist level 5', FieldKind.integer, 100, 'advanced', unit: '%',
+      help: 'Phase current of display assist level 5 in % of the phase current. Used with the No.2, Bafang, Kunteng and Tongsheng displays (KingMeter displays send their own %). Levels above 5 use level 5. 0 = 20 % per level.'),
+  Field('melody_pct', 'Startup melody volume', FieldKind.integer, 50, 'advanced', unit: '%',
+      help: 'The motor plays the ionrise melody at power-up (~1 s, the wheel does not move) and checks the 3 motor '
+          'phases: an open phase wire or a dead MOSFET is reported and the motor stays off. Peak current in % of the '
+          'phase current, 0 = off (no phase test then). Interrupted by the brake or by turning the wheel.'),
   Field('linear_regen', 'Proportional regen on AD2', FieldKind.boolean, false, 'advanced', help: 'Analog brake sensor on AD2.'),
   Field('voltage_ramp_v', 'Soft voltage ramp width', FieldKind.decimal, 1.0, 'advanced',
       unit: 'V', help: 'Current is reduced smoothly within this voltage above the cutoff and below full charge.'),
@@ -156,7 +169,6 @@ const fields = <Field>[
   Field('trigger_default', 'ADC trigger default', FieldKind.integer, 2020, 'expert', runtime: false),
   Field('timer_period', 'PWM timer period', FieldKind.integer, 2028, 'expert', runtime: false),
   Field('disable_dyn_adc', 'Fixed ADC trigger', FieldKind.boolean, false, 'expert', runtime: false),
-  Field('fast_loop_log', 'Fast loop logging', FieldKind.boolean, false, 'expert', runtime: false),
   Field('cal_bat_v', 'Battery voltage cal.', FieldKind.integer, 256, 'expert', runtime: false),
   Field('cal_v', 'Voltage cal. (mV/count)', FieldKind.integer, 25, 'expert', runtime: false),
   Field('cal_i', 'Current cal. (mA/count <<8)', FieldKind.text, '38LL<<8', 'expert', runtime: false),
@@ -171,7 +183,6 @@ const fields = <Field>[
   Field('obs_angle_deg', 'Sensorless: angle offset', FieldKind.decimal, 90.0, 'expert',
       unit: 'deg', help: '+90 matches the open loop start direction. Fine tune in small steps for smooth running.'),
   Field('spec_angle', 'Hall angle offset (unused)', FieldKind.text, '-715827882', 'expert', runtime: false),
-  Field('autodetect_at_boot', 'Autodetect at every power-up', FieldKind.boolean, false, 'expert', runtime: false),
 ];
 
 final fieldByKey = {for (final f in fields) f.key: f};
@@ -262,6 +273,11 @@ class BikeSettings {
     }
     if (d('fw_battery_a') < 0) p.add('Field weakening battery current must not be negative.');
     if (i('fw_ramp_ms') < 1 || i('fw_ramp_ms') > 10000) p.add('Field weakening ramp must be 1 ... 10000 ms.');
+    for (var n = 1; n <= 5; n++) {
+      final v = values.containsKey('assist_${n}_pct') ? i('assist_${n}_pct') : 20 * n;
+      if (v < 0 || v > 100) p.add('Assist level $n must be 0 ... 100 %.');
+    }
+    if (i('melody_pct') < 0 || i('melody_pct') > 100) p.add('Startup melody volume must be 0 ... 100 %.');
     if (i('fw_voltage_pct') < 50 || i('fw_voltage_pct') > 98) p.add('Field weakening voltage use must be 50 ... 98 %.');
     final idx = i('speed_temp_input');
     if (idx == 6 && b('torque_on_ad1')) p.add("Speed/temperature wire and torque sensor can't both use AD1.");

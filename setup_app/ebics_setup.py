@@ -1,8 +1,8 @@
 """
-EBiCS Setup - simple setup app for Lishui controllers running EBiCS and Kunteng (KT) controllers
+IonRiseSetApp (EBiCS Setup) - simple setup app for Lishui controllers running EBiCS and Kunteng (KT) controllers
 running the open source KT firmware.
 
-Start with "EBiCS Setup.bat" in the firmware folder, or: pythonw setup_app/ebics_setup.py
+Start with "IonRiseSetApp.bat" in the firmware folder, or: pythonw setup_app/ebics_setup.py
 
 Part of EBiCS, GPL v3 or later.
 """
@@ -42,6 +42,15 @@ def px(n):
 # ============================================================================================
 # helpers
 # ============================================================================================
+
+
+# autodetect texts (the hall calibration starts backwards: autodetect() in Src/main.c, kunteng/motor.c)
+CAL_CHECK = "The wheel is lifted and spins freely, the brake is released, hands and cables are away from the wheel - and on a direct drive (gearless) hub motor the chain is off"
+WARN_FIRST_BACK = "The motor first turns slowly BACKWARDS, then forwards. Watch which way it turns: you will be asked afterwards."
+KT_AD_START = ("The motor first turns BACKWARDS 3 turns, then forwards 2.5 turns (about 6 s, ~2.5 A). Watch which way it turns.\n\nConfirm: the wheel is lifted and spins freely, the brake is released, hands and cables are away from the wheel, and on a direct drive (gearless) hub motor the chain is off.")
+KT_AD_QUESTION = "Did the motor first turn backwards and then forwards?"
+KT_AD_WRONG_WAY = ("The motor runs the wrong way with this wiring: swap two motor phase wires and the matching two hall wires (e.g. blue and green of each), then run the autodetect again.")
+
 
 class LogBox(ttk.Frame):
     def __init__(self, master, height=10):
@@ -222,11 +231,23 @@ def read_fields(var_store, settings, c=core):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("EBiCS Setup")
+        self.title("IonRiseSetApp")
+        try:
+            self._icon = tk.PhotoImage(file=str(Path(__file__).with_name("ionrise_icon.png")))
+            self.iconphoto(True, self._icon)
+        except tk.TclError:
+            pass
         global SCALE
         SCALE = max(1.0, self.winfo_fpixels("1i") / 96.0)
         self.geometry(f"{px(1080)}x{px(720)}")
         self.minsize(px(900), px(620))
+        try:
+            self.state("zoomed")               # full size window (Windows, macOS)
+        except tk.TclError:
+            try:
+                self.attributes("-zoomed", True)   # Linux
+            except tk.TclError:
+                pass
         self.configure(bg=BG)
         self._style()
         self.stlink = core.StLink()
@@ -242,6 +263,16 @@ class App(tk.Tk):
         self.pages, self.nav = {}, {}
         self.show_chooser()
         self.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _image(self, name):
+        """PhotoImage from setup_app/, kept alive in a cache (Tk drops images without a reference)."""
+        cache = self.__dict__.setdefault("_images", {})
+        if name not in cache:
+            try:
+                cache[name] = tk.PhotoImage(file=str(Path(__file__).with_name(name)))
+            except tk.TclError:
+                cache[name] = None
+        return cache[name]
 
     # --- controller choice at start: Lishui (STM32, EBiCS) or Kunteng (STM8, KT firmware)
     def show_chooser(self):
@@ -263,7 +294,12 @@ class App(tk.Tk):
         f = ttk.Frame(self, style="Page.TFrame", padding=(px(60), px(50)))
         f.pack(fill="both", expand=True)
         self.chooser = f
-        ttk.Label(f, text="Which controller do you want to set up?", style="H1.TLabel").pack(anchor="w")
+        logo = self._image("ionrise_logo.png")
+        if logo:
+            tk.Label(f, image=logo, bg=BG).pack(anchor="w", pady=(0, 6))
+        ttk.Label(f, text="IonRiseSetApp", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(f, text="powered by the open source EBiCS and KT firmware", style="Muted.TLabel").pack(anchor="w", pady=(0, 24))
+        ttk.Label(f, text="Which controller do you want to set up?", style="H2.TLabel").pack(anchor="w")
         ttk.Label(f, text="Look at the label and the chip on the controller board. You can switch later with "
                           "'Change controller'.", style="Muted.TLabel").pack(anchor="w", pady=(4, 22))
         var = tk.StringVar(value=last if last in ("lishui", "kunteng") else "lishui")
@@ -299,8 +335,13 @@ class App(tk.Tk):
         self.sidebar = tk.Frame(self, bg=SIDEBAR, width=px(210))
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
-        name, sub_text = ("KT", kt.SUBTITLE) if self.kind == "kunteng" else ("EBiCS", "Lishui controller setup")
-        tk.Label(self.sidebar, text=name, font=("Segoe UI Semibold", 20), fg="white", bg=SIDEBAR).pack(pady=(22, 0))
+        name, sub_text = ("KT firmware", kt.SUBTITLE) if self.kind == "kunteng" else ("EBiCS", "Lishui controller setup")
+        logo = self._image("ionrise_logo_white.png")
+        if logo:
+            tk.Label(self.sidebar, image=logo, bg=SIDEBAR).pack(pady=(22, 6))
+        else:
+            tk.Label(self.sidebar, text="IONRISE", font=("Segoe UI Semibold", 20), fg="white", bg=SIDEBAR).pack(pady=(22, 0))
+        tk.Label(self.sidebar, text=name, font=("Segoe UI Semibold", 12), fg="white", bg=SIDEBAR).pack()
         tk.Label(self.sidebar, text=sub_text, font=("Segoe UI", 9), fg="#9fb0c2", bg=SIDEBAR).pack(pady=(0, 20))
 
         self.content = ttk.Frame(self, style="Page.TFrame")
@@ -418,7 +459,7 @@ class Page(ttk.Frame):
 class HomePage(Page):
     def __init__(self, master, app):
         super().__init__(master, app)
-        ttk.Label(self, text="Welcome", style="H1.TLabel").pack(anchor="w")
+        ttk.Label(self, text="Welcome to IonRiseSetApp", style="H1.TLabel").pack(anchor="w")
         ttk.Label(self, text="This app sets up your Lishui controller with the open source EBiCS firmware:\n"
                              "unlock the chip, install the firmware, calibrate the motor and test everything.",
                   style="Big.TLabel").pack(anchor="w", pady=(4, 18))
@@ -628,7 +669,7 @@ class FlashPage(Page):
 
 class LivePage(Page):
     TILES = [("battery", "Battery", "V"), ("speed", "Speed", "km/h"), ("assist", "Assist level", ""),
-             ("throttle", "Throttle", "%"), ("brake", "Brake", ""), ("motor_a", "Motor current", "A"), ("fw_a", "Field weakening", "A"),
+             ("throttle", "Throttle", "%"), ("brake", "Brake", ""), ("motor_a", "Motor current", "A"), ("fw_a", "Field weakening", "A"), ("phases", "Motor phases", ""),
              ("battery_a", "Battery current", "A"), ("pas", "Pedal pulses", ""), ("halls", "Hall events", ""),
              ("temp", "Controller temp", "\u00b0C"), ("calibrated", "Motor calibrated", ""), ("kv", "KV", ""),
              ("motor_temp", "Motor temp", "\u00b0C"), ("wire_raw", "Speed/temp wire (raw ADC)", ""),
@@ -691,6 +732,7 @@ class LivePage(Page):
             put("brake", "PRESSED" if snap.get("brake_flag") else "off")
             put("motor_a", f"{(snap.get('MS.i_q') or 0) * cal_i / 1000:.1f}")
             put("fw_a", f"{(snap.get('i32_fw_id') or 0) * cal_i / 1000:.1f}")
+            put("phases", core.phase_fault_text(snap.get("ui8_phase_fault"), s))
             put("battery_a", f"{(snap.get('MS.Battery_Current') or 0) / 1000:.1f}")
             put("pas", str(snap.get("ui32_pas_events", "-")))
             put("halls", str(snap.get("ui32_hall_events", "-")))
@@ -976,9 +1018,7 @@ class KtToolsPage(Page):
                         lambda ok: self.log.add("unlocked - switch the controller off and on again, then install the firmware"
                                                 if ok is True else "unlock failed"))
         elif what == "autodetect":
-            if not messagebox.askyesno("Hall autodetect", "The motor turns slowly 3 turns forward and 2.5 back "
-                                                          "(about 6 s, ~2.5 A).\n\nLift the wheel, release the brake and "
-                                                          "keep hands away from the wheel. Start?"):
+            if not messagebox.askyesno("Hall autodetect", KT_AD_START + "\n\nStart?"):
                 return
             syms = kt.live_symbols()
             if not syms:
@@ -999,6 +1039,12 @@ class KtToolsPage(Page):
                     return
                 for line in kt_live.describe_autodetect(res):
                     self.log.add(line)
+                if isinstance(res, dict) and res.get("ui8_ad_state") == 3:
+                    if messagebox.askyesno("Motor direction", KT_AD_QUESTION):
+                        self.log.add("direction OK")
+                    else:
+                        self.log.add(KT_AD_WRONG_WAY)
+                        messagebox.showwarning("Motor direction", KT_AD_WRONG_WAY)
             self.app.bg(job, done)
         elif what == "defines":
             self.log.clear()
@@ -1368,13 +1414,9 @@ class WizardPage(Page):
                           "Sensorless is experimental: test with the wheel lifted, low current first."])
             return
         self.text("The controller now finds the position of the motor's hall sensors and measures the motor. "
-                  "Before you start:")
-        checks = []
-        for t in ("The wheel is lifted and can spin freely", "Nothing touches the wheel, chain or pedals",
-                  "Hands and cables are away from the wheel"):
-            v = tk.BooleanVar()
-            ttk.Checkbutton(self.body, text=t, variable=v).pack(anchor="w", padx=10, pady=2)
-            checks.append(v)
+                  + WARN_FIRST_BACK)
+        checks = [tk.BooleanVar()]
+        ttk.Checkbutton(self.body, text=CAL_CHECK, variable=checks[0]).pack(anchor="w", padx=10, pady=2)
         st = self.status()
         bar = ttk.Progressbar(self.body, length=px(560), maximum=100)
         bar.pack(anchor="w", pady=4)
@@ -1384,7 +1426,7 @@ class WizardPage(Page):
 
         def start():
             if not all(v.get() for v in checks):
-                messagebox.showinfo("Calibration", "Please confirm all three points first.")
+                messagebox.showinfo("Calibration", "Please confirm the safety point first.")
                 return
             btn.state(["disabled"])
             st.configure(text="Starting ...", foreground=MUTED)
@@ -1454,7 +1496,7 @@ class WizardPage(Page):
                 st.configure(text="Starting ...", foreground=MUTED)
             elif state == 1:
                 st.configure(text="1/2  Finding the hall sensor positions ...", foreground=ACCENT)
-                detail.configure(text="The motor turns slowly forward and back and may click or buzz - that is normal. About 12 seconds.")
+                detail.configure(text="The motor turns slowly backwards first, then forwards, and may click or buzz - that is normal. About 12 seconds.")
                 bar["value"] = prog
             elif state == 2:
                 st.configure(text="2/2  Measuring the motor speed ...", foreground=ACCENT)
@@ -1541,11 +1583,12 @@ class WizardPage(Page):
 
     def s_direction(self):
         self.head.configure(text="Motor direction")
-        if self.app.settings.get("sensorless") or not self.app.settings.get("throttle"):
+        hall = not self.app.settings.get("sensorless")
+        if hall:
+            self.text("During the calibration: did the motor first turn backwards and then forwards?")
+        else:
             self.text("Give the motor a short spin (throttle, or turn the pedals with the wheel lifted). "
                       "Which way did the wheel turn?")
-        else:
-            self.text("During the calibration the wheel spun up. Which way did it turn?")
         row = ttk.Frame(self.body, style="Page.TFrame")
         row.pack(anchor="w", pady=10)
         st = self.status()
@@ -1561,8 +1604,10 @@ class WizardPage(Page):
                 st.configure(text="OK - the direction will be reversed. The firmware is installed again in a moment.",
                              foreground=WARN)
             self.block(False)
-        ttk.Button(row, text="Forward (correct)", style="Accent.TButton", command=lambda: answer(True)).pack(side="left")
-        ttk.Button(row, text="Backward", command=lambda: answer(False)).pack(side="left", padx=10)
+        ttk.Button(row, text="Yes, backwards first" if hall else "Forward (correct)", style="Accent.TButton",
+                   command=lambda: answer(True)).pack(side="left")
+        ttk.Button(row, text="No, forwards first" if hall else "Backward",
+                   command=lambda: answer(False)).pack(side="left", padx=10)
 
     def s_gear(self):
         self.head.configure(text="Measure the motor gearing")

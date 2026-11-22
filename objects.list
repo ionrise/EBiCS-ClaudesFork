@@ -26,7 +26,6 @@
 "./build/display_No_2.o"
 "./build/eeprom.o"
 "./build/main.o"
-"./build/print.o"
 "./build/stm32f1xx_hal_msp.o"
 "./build/stm32f1xx_it.o"
 "./build/system_stm32f1xx_Bootloader.o"

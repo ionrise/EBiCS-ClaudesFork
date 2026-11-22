@@ -67,7 +67,8 @@ def test_vectors():
     s = dict(base)
     s.update(battery=0, full_voltage_v=58.8, voltage_min_v=44.0, wheel="custom", wheel_mm=2155, speed_limit=32,
              phase_current_a=22.5, battery_current_a=18, pas_magnets=32, throttle=False, legal_mode=True,
-             reverse=True, gear_ratio=88, regen_current_a=5, regen_max_a=3.5, voltage_ramp_v=1.5)
+             reverse=True, gear_ratio=88, regen_current_a=5, regen_max_a=3.5, voltage_ramp_v=1.5,
+             assist_1_pct=15, assist_2_pct=35, assist_3_pct=55, assist_4_pct=75, assist_5_pct=90, melody_pct=30)
     cases.append(("custom_battery_legal_reverse", s))
     s = dict(base)
     s.update(sensorless=True, speed_temp_input=5, speed_on_wire=True, temp_on_wire=True, ntc_pullup_ohm=4700,
@@ -81,8 +82,8 @@ def kunteng_test_vectors():
     cases = [("defaults", kt.default_settings())]
     s = kt.default_settings()
     s.update(controller=2, cells=13, motor_current_a=22, regen_current_a=6, throttle_type=2, direct_drive=True,
-             pas_magnets=12, pas_direction=1, pas_max_cadence=75, assist_1=0.125, assist_2=0.333, assist_3=0.5,
-             assist_4=0.875, assist_5=0.95, over_voltage_protection=True, rotor_offset_angle=190,
+             pas_magnets=12, pas_direction=1, pas_max_cadence=75, assist_1=12, assist_2=33, assist_3=50,
+             assist_4=88, assist_5=95, phase_current_factor_x10=30, foc_correction=False, melody=False, over_voltage_protection=True, rotor_offset_angle=190,
              foc_angle_adjust=140, erps_interpolation=20, max_speed=32, wheel=0x18, phase_current_limit=False,
              hall_learning=False, display=1, ramp_s=1.25, motor_characteristic=88, foc_delay_us=-42)
     cases.append(("everything_changed", s))
@@ -148,7 +149,7 @@ def main():
         return 1
 
     variants = [v for v in variant_list() if not args.only or v["name"] in args.only]
-    manifest = {"format": 1, "firmware_version": git_version(), "flash_base": FLASH_BASE,
+    manifest = {"format": 1, "firmware_version": "ionrise " + git_version(), "flash_base": FLASH_BASE,
                 "settings_block": {"address": core.SETTINGS_BLOCK_ADDR, "size": core.SETTINGS_BLOCK_SIZE,
                                    "magic": core.SETTINGS_MAGIC, "version": core.SETTINGS_VERSION},
                 "eeprom_start": EEPROM_START, "setup_magic": core.SETUP_MAGIC, "variants": []}

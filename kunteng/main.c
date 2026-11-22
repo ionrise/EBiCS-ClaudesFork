@@ -97,6 +97,7 @@ int main (void)
   wheel_speed_sensor_init ();
   display_init ();
   enableInterrupts ();
+  motor_melody (); // ionrise startup melody, also checks the motor phases
 
   while (1)
   {

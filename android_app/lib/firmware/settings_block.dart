@@ -24,7 +24,8 @@ class SettingsBlock {
     'motor_temp_threshold', 'motor_temp_max', 'frac_high', 'frac_low', 'reverse',
     'speed_temp_adc', 'speed_temp_threshold', 'ntc_pullup_ohm',
     'obs_inductance', 'obs_resistance', 'obs_flux_linkage', 'obs_gamma', 'obs_angle_offset',
-    'current_ramp_ms', 'fw_current_max', 'fw_battery_current_max', 'fw_ramp_ms', 'fw_voltage_pct',
+    'current_ramp_ms', 'fw_current_max', 'fw_battery_current_max', 'fw_ramp_ms', 'fw_voltage_pct', 'melody_pct',
+    'assist_pct_lo', 'assist_pct_hi',
   ];
 
   /// Python round(): halves to even.
@@ -48,6 +49,7 @@ class SettingsBlock {
     int units(String k) => pyRound(s.d(k) * 1000 / calI);
     int ma(String k) => pyRound(s.d(k) * 1000);
     int atLeast1(int v) => v < 1 ? 1 : v;
+    int ap(int n) => (s.values.containsKey('assist_${n}_pct') ? s.i('assist_${n}_pct') : 20 * n).clamp(0, 100);
     final st = s.i('speed_temp_input');
     final speedFromWire = st != 0 && s.b('speed_on_wire');
     final tempFromWire = st != 0 && s.b('temp_on_wire');
@@ -104,6 +106,10 @@ class SettingsBlock {
       'fw_battery_current_max': s.values.containsKey('fw_battery_a') && ma('fw_battery_a') > 0 ? ma('fw_battery_a') : 0,
       'fw_ramp_ms': (s.values.containsKey('fw_ramp_ms') ? s.i('fw_ramp_ms') : 500).clamp(1, 10000),
       'fw_voltage_pct': (s.values.containsKey('fw_voltage_pct') ? s.i('fw_voltage_pct') : 90).clamp(50, 98),
+      'melody_pct': (s.values.containsKey('melody_pct') ? s.i('melody_pct') : 50).clamp(0, 100),
+      // assist levels 1..5 in %, bytes 180..184 (uint8_t assist_pct[8]) packed into two int32 fields
+      'assist_pct_lo': ap(1) | (ap(2) << 8) | (ap(3) << 16) | (ap(4) << 24),
+      'assist_pct_hi': ap(5),
     };
     for (var n = 0; n < 5; n++) {
       v['battery_level_${n + 1}'] = bars[n] * 10;

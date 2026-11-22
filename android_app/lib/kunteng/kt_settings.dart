@@ -130,11 +130,16 @@ const ktFields = <KtField>[
     help: 'Switch this if the motor only assists when pedalling backwards.',
   ),
   KtField('pas_max_cadence', 'Cadence for full PAS power', KtKind.integer, 90, 'advanced', unit: 'rpm'),
-  KtField('assist_1', 'Assist level 1', KtKind.decimal, 0.2, 'advanced', unit: 'x', help: '0 ... 1'),
-  KtField('assist_2', 'Assist level 2', KtKind.decimal, 0.4, 'advanced', unit: 'x', help: '0 ... 1'),
-  KtField('assist_3', 'Assist level 3', KtKind.decimal, 0.6, 'advanced', unit: 'x', help: '0 ... 1'),
-  KtField('assist_4', 'Assist level 4', KtKind.decimal, 0.8, 'advanced', unit: 'x', help: '0 ... 1'),
-  KtField('assist_5', 'Assist level 5', KtKind.decimal, 1.0, 'advanced', unit: 'x', help: '0 ... 1'),
+  KtField('assist_1', 'Assist level 1', KtKind.integer, 20, 'advanced', unit: '%',
+      help: 'Power of display level 1 in % of the max motor current (throttle and PAS).'),
+  KtField('assist_2', 'Assist level 2', KtKind.integer, 40, 'advanced', unit: '%',
+      help: 'Power of display level 2 in % of the max motor current (throttle and PAS).'),
+  KtField('assist_3', 'Assist level 3', KtKind.integer, 60, 'advanced', unit: '%',
+      help: 'Power of display level 3 in % of the max motor current (throttle and PAS).'),
+  KtField('assist_4', 'Assist level 4', KtKind.integer, 80, 'advanced', unit: '%',
+      help: 'Power of display level 4 in % of the max motor current (throttle and PAS).'),
+  KtField('assist_5', 'Assist level 5', KtKind.integer, 100, 'advanced', unit: '%',
+      help: 'Power of display level 5 in % of the max motor current (throttle and PAS).'),
   KtField(
     'ramp_s',
     'Power ramp (time to full power)',
@@ -205,6 +210,15 @@ const ktFields = <KtField>[
     help: 'Use field weakening only while the throttle is pressed, not with PAS alone.',
   ),
   KtField(
+    'melody',
+    'Startup melody + phase test',
+    KtKind.boolean,
+    1,
+    'advanced',
+    help: 'The motor plays the ionrise melody at power-up (~1 s, the wheel does not move) and checks the 3 motor '
+        'phases: an open phase wire or a dead MOSFET keeps the motor off. Interrupted by the brake or by turning the wheel.',
+  ),
+  KtField(
     'rotor_offset_angle',
     'Hall sensor angle offset',
     KtKind.integer,
@@ -223,6 +237,24 @@ const ktFields = <KtField>[
     'expert',
     unit: 'us',
     help: 'Moves the FOC sample angle with the speed. 0 = off. Signed, tune it on the bike with Live data.',
+  ),
+  KtField(
+    'phase_current_factor_x10',
+    'Phase current limit (x battery current)',
+    KtKind.integer,
+    25,
+    'expert',
+    unit: 'x0.1',
+    help: 'Phase current limit as a multiple of the max motor current, in tenths: 25 = 2.5 x.',
+  ),
+  KtField(
+    'foc_correction',
+    'Automatic FOC angle correction',
+    KtKind.boolean,
+    1,
+    'expert',
+    help: 'Moves the angle until the phase B current crosses zero at the FOC sample angle. Untick to drive with '
+        'the fixed hall angle only (try it if the motor runs rough).',
   ),
   KtField(
     'phase_current_limit',
@@ -267,6 +299,13 @@ class KtSettings {
       if (v is bool) s[f.key] = v ? 1 : 0;
       if (v is num) s[f.key] = v;
     }
+    // settings saved before had the assist levels as a factor 0 ... 1: convert to %
+    final a = [for (var n = 1; n <= 5; n++) j['assist_$n']];
+    if (a.every((v) => v is num) && a.every((v) => (v as num) <= 1) && a.any((v) => v is double)) {
+      for (var n = 1; n <= 5; n++) {
+        s['assist_$n'] = SettingsBlock.pyRound((a[n - 1] as num).toDouble() * 100);
+      }
+    }
     return s;
   }
 
@@ -279,7 +318,7 @@ class KtSettings {
     if (i('pas_magnets') < 1 || i('pas_magnets') > 64) p.add('PAS magnets must be 1 ... 64.');
     if (i('pas_max_cadence') < 30 || i('pas_max_cadence') > 150) p.add('Cadence must be 30 ... 150 rpm.');
     for (var n = 1; n <= 5; n++) {
-      if (d('assist_$n') < 0 || d('assist_$n') > 1) p.add('Assist level $n must be between 0 and 1.');
+      if (i('assist_$n') < 0 || i('assist_$n') > 100) p.add('Assist level $n must be 0 ... 100 %.');
     }
     if (i('max_speed') < 5 || i('max_speed') > 70) p.add('Speed limit must be 5 ... 70 km/h.');
     for (final k in ['rotor_offset_angle', 'foc_angle_adjust']) {
@@ -310,11 +349,13 @@ class KtSettings {
         (b2i('over_voltage_protection') * 4) |
         (b('phase_current_limit') ? 0 : 8) |
         (b('hall_learning') ? 0 : 16) |
-        (b2i('fw_throttle_only') * 32);
+        (b2i('fw_throttle_only') * 32) |
+        (b('melody') ? 0 : 64) |
+        (b('foc_correction') ? 0 : 128);
     out[9] = i('pas_magnets');
     out[10] = i('pas_max_cadence');
     for (var n = 0; n < 5; n++) {
-      out[11 + n] = SettingsBlock.pyRound(d('assist_${n + 1}') * 100);
+      out[11 + n] = i('assist_${n + 1}').clamp(0, 100);
     }
     out[16] = i('rotor_offset_angle') & 0xFF;
     out[17] = i('foc_angle_adjust') & 0xFF;
@@ -322,7 +363,7 @@ class KtSettings {
     out[19] = i('max_speed');
     out[20] = i('wheel');
     out[21] = i('controller');
-    out[22] = 25;
+    out[22] = i('phase_current_factor_x10');
     out[23] = i('display');
     out[24] = SettingsBlock.pyRound(d('ramp_s') * 10);
     out[25] = (i('foc_delay_us') ~/ 4) & 0xFF; // int8, truncated toward zero like the desktop app

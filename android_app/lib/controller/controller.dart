@@ -221,7 +221,7 @@ class Controller extends ChangeNotifier {
     'ui16_throttle': 'u16', 'ui16_throttle_offset': 'u16', 'uint16_full_rotation_counter': 'u16',
     'i16_hall_order': 'i16', 'ui32_KV': 'i16', 'ui8_watchdog_reset': 'u8', 'ui16_motor_temp_adc': 'u16',
     'ui8_sensorless_running': 'u8', 'ui8_settings_source': 'u8', 'ui8_motor_temp_sensor_ok': 'u8',
-    'ui8_setup_hall_spread': 'u8', 'i32_fw_id': 'i32',
+    'ui8_setup_hall_spread': 'u8', 'i32_fw_id': 'i32', 'ui8_phase_fault': 'u8',
   };
 
   /// Autodetect forward / backward readings, same order as [halls].
@@ -306,6 +306,14 @@ class Controller extends ChangeNotifier {
 }
 
 // ------------------------------------------------------------------ helpers like ebics_core
+
+/// Live view text for ui8_phase_fault (phase test of the startup melody), like ebics_core.phase_fault_text.
+String phaseFaultText(int fault, BikeSettings s) {
+  if (s.i('melody_pct') == 0) return 'not tested (melody off)';
+  if (fault == 0) return 'OK';
+  final axes = [for (var i = 0; i < 3; i++) if (fault & (1 << i) != 0) 'ABC'[i]].join('/');
+  return 'FAULT axis $axes - check phase wires / MOSFETs';
+}
 
 double speedKmh(Map<String, int>? snap, BikeSettings s) {
   if (snap == null || (snap['uint16_full_rotation_counter'] ?? 8000) >= 8000) return 0;

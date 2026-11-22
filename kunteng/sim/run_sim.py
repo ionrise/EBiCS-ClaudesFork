@@ -402,6 +402,8 @@ def main():
         boot(sim, kt.settings_block(s))
         sim.setmem(0x53F2, [140])                    # 10S at 38 V
         sim.setmem(0x53F0, [0x40 + 20, 0])           # total current: 20 steps of 0.5 A above the zero offset
+        # the limit works on the filtered battery current (10 ms filter, the shunt sample is a phase current pulse)
+        sim.setmem(syms["i16_motor_current_filtered_10b"], [0, 80])   # 10 A in 0.125 A steps
         sim.setmem(syms["ui16_duty_cycle"], [0, 100])
         sim.setmem(syms["ui16_duty_cycle_target"], [0, 100])
         sim.run_ms(2)                                # ~60 PWM interrupts in the simulator

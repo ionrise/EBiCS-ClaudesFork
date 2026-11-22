@@ -31,9 +31,6 @@ q31_t x1;
 q31_t x2;
 q31_t teta_obs;
 
-#ifdef FAST_LOOP_LOG
-q31_t e_log[300][6];
-#endif
 
 q31_t z;
 char Obs_flag=1;
@@ -104,32 +101,6 @@ void FOC_calculation(int16_t int16_i_as, int16_t int16_i_bs, q31_t q31_teta, int
 
 
 
-#ifdef FAST_LOOP_LOG
-	temp1=int16_i_as;
-	temp2=int16_i_bs;
-	temp3=MS_FOC->i_d;
-	temp4=MS_FOC->i_q;
-	temp5=MS_FOC->u_d;
-	temp6=MS_FOC->u_q;
-
-	if(uint32_PAS_counter < RS.pas_timeout&&ui8_debug_state==0)
-			{
-		e_log[z][0]=temp1;//fl_e_alpha_obs;
-		e_log[z][1]=temp2;//fl_e_beta_obs;
-		e_log[z][2]=temp3;//(q31_t)q31_teta_obs>>24;
-		e_log[z][3]=temp4;
-		e_log[z][4]=temp5;
-		e_log[z][5]=temp6;
-		z++;
-		if(z>150) Obs_flag=1;
-		if (z>299)
-		{z=0;
-
-		ui8_debug_state=2;}
-			}
-	else {if(ui8_debug_state==2)ui8_debug_state=3;;}
-
-#endif
 
 	//call SVPWM calculation
 	svpwm(q31_u_alpha, q31_u_beta);
