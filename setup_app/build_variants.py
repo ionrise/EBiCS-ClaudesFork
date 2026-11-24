@@ -38,7 +38,7 @@ import kunteng_core as kt  # noqa: E402
 SYMBOLS = (list(core.LIVE_VARS) + core.HALLS + core.HALL_DIRS +
            ["MS", "adcData", "ui8_setup_cmd", "RS", "ui8_settings_source", "ui8_motor_temp_sensor_ok",
             "ebics_settings_flash"])
-TREE = ["Src", "Inc", "Drivers", "Startup", "make", "STM32F103C6Tx_FLASH.ld"]
+TREE = ["Src", "Inc", "Drivers", "Startup", "make", "ionrise", "STM32F103C6Tx_FLASH.ld"]
 FLASH_BASE = 0x08000000
 EEPROM_START = 0x08007800
 

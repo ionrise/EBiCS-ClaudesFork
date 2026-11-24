@@ -193,6 +193,9 @@
 #ifndef DISPLAY_TYPE_VESC
 #define DISPLAY_TYPE_VESC (1<<9)        // VESC UART protocol (telemetry + current command)
 #endif
+#ifndef DISPLAY_TYPE_IONRISE
+#define DISPLAY_TYPE_IONRISE (1<<10)    // IONRISE display (iondisp), ionrise/IONRISE_PROTOCOL.md
+#endif
 uint32_t get_wheeltime_ms(void);
 uint8_t motor_is_turning(void);
 int32_t map (int32_t x, int32_t in_min, int32_t in_max, int32_t out_min, int32_t out_max);

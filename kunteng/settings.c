@@ -9,6 +9,7 @@
 #include "stm8s.h"
 #include "main.h"
 #include "settings.h"
+#include "display.h"
 
 struct_kt_settings kt_settings;
 
@@ -16,9 +17,12 @@ struct_kt_settings kt_settings;
 #define PHASE_CURRENT_FACTOR_X10 25 // phase current may be 2.5 x the battery current limit
 #endif
 
+// the block is read from the data EEPROM, or from a RAM copy when the IONRISE display checks its staging block
+static const volatile uint8_t *p_settings_src = (const volatile uint8_t *) SETTINGS_BLOCK_ADDRESS;
+
 static uint8_t read_eeprom (uint8_t ui8_offset)
 {
-  return *((volatile uint8_t *) (SETTINGS_BLOCK_ADDRESS + ui8_offset));
+  return p_settings_src[ui8_offset];
 }
 
 static void load_defaults (void)
@@ -71,12 +75,11 @@ static void load_defaults (void)
   kt_settings.ui8_fw_ramp_dps = 0;
 }
 
-// returns 1 if the EEPROM block is valid and in range
-static uint8_t load_block (void)
+// 1 if the block is valid and in range
+static uint8_t block_ok (void)
 {
   uint8_t ui8_i;
   uint8_t ui8_sum = 0;
-  uint8_t ui8_p;
 
   if ((read_eeprom (0) != 'K') || (read_eeprom (1) != 'T') ||
       (read_eeprom (2) != SETTINGS_BLOCK_VERSION) || (read_eeprom (3) != SETTINGS_BLOCK_LENGTH))
@@ -96,7 +99,16 @@ static uint8_t load_block (void)
   for (ui8_i = 11; ui8_i <= 15; ui8_i++) { if (read_eeprom (ui8_i) > 100) { return 0; } }
   if ((read_eeprom (18) < 5) || (read_eeprom (18) > 100)) { return 0; }
   if ((read_eeprom (22) < 10) || (read_eeprom (22) > 40)) { return 0; }
+  return 1;
+}
 
+// returns 1 if the EEPROM block is valid and in range
+static uint8_t load_block (void)
+{
+  uint8_t ui8_i;
+  uint8_t ui8_p;
+
+  if (!block_ok ()) { return 0; }
   kt_settings.ui8_cells = read_eeprom (4);
   kt_settings.ui8_motor_current_a = read_eeprom (5);
   kt_settings.ui8_regen_current_a = read_eeprom (6);
@@ -115,7 +127,7 @@ static uint8_t load_block (void)
   kt_settings.ui8_controller_type = read_eeprom (21);
   kt_settings.ui8_phase_current_factor_x10 = read_eeprom (22);
   ui8_p = read_eeprom (23);
-  if (ui8_p <= 8) { kt_settings.ui8_display = ui8_p; } // DISPLAY_LAST (display.h)
+  if (ui8_p <= DISPLAY_LAST) { kt_settings.ui8_display = ui8_p; }
   ui8_p = read_eeprom (24);
   if (ui8_p <= 50) { kt_settings.ui8_ramp_x10 = ui8_p; }
   kt_settings.i8_foc_delay_x4us = (int8_t) read_eeprom (25);
@@ -173,6 +185,58 @@ void settings_init (void)
   load_defaults ();
   kt_settings.ui8_from_eeprom = load_block ();
   calc_derived ();
+}
+
+uint8_t settings_check (const uint8_t *p_block)
+{
+  uint8_t ui8_ok;
+  p_settings_src = p_block;
+  ui8_ok = block_ok ();
+  p_settings_src = (const volatile uint8_t *) SETTINGS_BLOCK_ADDRESS;
+  return ui8_ok;
+}
+
+uint8_t settings_state (void)
+{
+  if (kt_settings.ui8_from_eeprom) { return 1; }
+  return ((read_eeprom (0) == 'K') && (read_eeprom (1) == 'T')) ? 2 : 0;
+}
+
+void settings_pack (uint8_t *p)
+{
+  uint8_t ui8_i;
+  uint8_t ui8_sum = 0;
+  if (kt_settings.ui8_from_eeprom)
+  {
+    for (ui8_i = 0; ui8_i < SETTINGS_BLOCK_LENGTH; ui8_i++) { p[ui8_i] = read_eeprom (ui8_i); }
+    return;
+  }
+  p[0] = 'K'; p[1] = 'T'; p[2] = SETTINGS_BLOCK_VERSION; p[3] = SETTINGS_BLOCK_LENGTH;
+  p[4] = kt_settings.ui8_cells;
+  p[5] = kt_settings.ui8_motor_current_a;
+  p[6] = kt_settings.ui8_regen_current_a;
+  p[7] = kt_settings.ui8_throttle_type;
+  p[8] = kt_settings.ui8_flags;
+  p[9] = kt_settings.ui8_pas_magnets;
+  p[10] = kt_settings.ui8_pas_max_cadence;
+  for (ui8_i = 0; ui8_i < 5; ui8_i++) { p[11 + ui8_i] = kt_settings.ui8_assist_percent[ui8_i]; }
+  p[16] = kt_settings.ui8_rotor_offset_angle;
+  p[17] = kt_settings.ui8_foc_angle_adjust;
+  p[18] = kt_settings.ui8_erps_interpolation;
+  p[19] = kt_settings.ui8_default_max_speed;
+  p[20] = kt_settings.ui8_default_wheel_size;
+  p[21] = kt_settings.ui8_controller_type;
+  p[22] = kt_settings.ui8_phase_current_factor_x10;
+  p[23] = kt_settings.ui8_display;
+  p[24] = kt_settings.ui8_ramp_x10;
+  p[25] = (uint8_t) kt_settings.i8_foc_delay_x4us;
+  p[26] = kt_settings.ui8_motor_characteristic;
+  p[27] = kt_settings.ui8_fw_angle_deg;
+  p[28] = kt_settings.ui8_fw_battery_a;
+  p[29] = kt_settings.ui8_fw_phase_a;
+  p[30] = kt_settings.ui8_fw_ramp_dps;
+  for (ui8_i = 0; ui8_i < (SETTINGS_BLOCK_LENGTH - 1); ui8_i++) { ui8_sum += p[ui8_i]; }
+  p[SETTINGS_BLOCK_LENGTH - 1] = (uint8_t) ~ui8_sum;
 }
 
 uint8_t settings_flag (uint8_t ui8_flag)

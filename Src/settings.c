@@ -8,6 +8,9 @@
 #include "config.h"
 #include "main.h"
 #include "settings.h"
+#if (DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+#include "display_ionrise.h"
+#endif
 
 #ifndef OBS_ANGLE_OFFSET
 #define OBS_ANGLE_OFFSET 238609294L
@@ -149,14 +152,33 @@ static uint8_t settings_plausible(const ebics_settings_t *s)
 	return 1;
 }
 
+// the whole boot check: magic, version, size, CRC, plausible values
+uint8_t settings_check(const ebics_settings_t *f)
+{
+	return f->magic == EBICS_SETTINGS_MAGIC && f->version == EBICS_SETTINGS_VERSION && f->size == EBICS_SETTINGS_SIZE &&
+			f->crc == settings_crc32((const uint8_t *) f, EBICS_SETTINGS_SIZE - 4) && settings_plausible(f);
+}
+
 void settings_load(void)
 {
 	const ebics_settings_t *f = (const ebics_settings_t *) EBICS_SETTINGS_ADDR;
 	RS = settings_default;
 	ui8_settings_source = 0;
+#if (DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+	// a block the IONRISE display handed over through a software reset (RAM kept): used once, a power cycle
+	// falls back to the flash block (the display pushes its profile again)
+	if (ion_handoff.magic == ION_HANDOFF_MAGIC) {
+		ion_handoff.magic = 0;
+		if (ion_handoff.crc == settings_crc32(ion_handoff.block, EBICS_SETTINGS_SIZE) &&
+				settings_check((const ebics_settings_t *) ion_handoff.block)) {
+			memcpy(&RS, ion_handoff.block, sizeof(RS));
+			ui8_settings_source = 3;
+			return;
+		}
+	}
+#endif
 	if (f->magic != EBICS_SETTINGS_MAGIC) return;   // no block (erased flash or desktop build)
-	if (f->version == EBICS_SETTINGS_VERSION && f->size == EBICS_SETTINGS_SIZE &&
-			f->crc == settings_crc32((const uint8_t *) f, EBICS_SETTINGS_SIZE - 4) && settings_plausible(f)) {
+	if (settings_check(f)) {
 		memcpy(&RS, f, sizeof(RS));
 		ui8_settings_source = 1;
 	}

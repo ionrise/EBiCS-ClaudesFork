@@ -10,6 +10,8 @@
  *     display_tongsheng.c)
  *   - VESC UART (115200 baud): live values for VESC displays / apps, current requests (display_vesc.c)
  *   - EBiCS app / BLE module: ANT+ LEV pages 1 / 4 out, page 16 in (display_ebics.c)
+ *   - IONRISE (iondisp display): handshake, full telemetry, the display reads / writes the settings block
+ *     (protocol code shared with iondisp and EBiCS Lishui in ../ionrise, spec ionrise/IONRISE_PROTOCOL.md)
  * Receiving and sending are interrupt driven (ring buffers), so the main loop never waits for the UART.
  *
  * This file is part of the KT firmware, GPL v3.
@@ -26,6 +28,7 @@
 #include "motor.h"
 #include "brake.h"
 #include "eeprom.h"
+#include "ionctrl.h"
 
 extern volatile struc_lcd_configuration_variables lcd_configuration_variables;
 extern float f_wheel_speed;
@@ -34,6 +37,13 @@ uint8_t ebike_app_cruise_control_is_set (void);
 uint8_t throttle_is_set (void);
 
 uint16_t ui16_display_wheel_perimeter_mm = 0;
+uint8_t ui8_display_power_pct = 100;  // power limit of the display (IONRISE), % of the current limits
+uint8_t ui8_display_no_throttle = 0;  // the display asks to ignore the throttle (IONRISE)
+extern uint8_t ui8_pas_cadence_rpm;
+extern volatile uint8_t ui8_ad_cmd;
+extern volatile uint8_t ui8_ad_active;
+extern volatile uint8_t ui8_phase_fault;
+extern volatile uint8_t ui8_fw_angle;
 
 // ------------------------------------------------------------------------------------------- ring buffers
 #define RX_SIZE 64      // power of 2
@@ -762,6 +772,206 @@ static void ebics_send_page (void)
   for (ui8_i = 0; ui8_i < 12; ui8_i++) { tx (ui8_buf[ui8_i]); }
 }
 
+// ------------------------------------------------------------------------------------------- IONRISE
+// The display is the master and sends every 100 ms; the protocol logic is in ionrise/ionctrl.c, here are its
+// hooks. Settings: the display reads / writes a RAM copy of the 32 byte block (staging), APPLY checks it like
+// the boot code, writes it into the data EEPROM (PERSIST) and restarts (REBOOT): all values are derived at boot.
+#define ION_KT_VERSION 0x0100  // KT firmware version reported in HELLO
+
+static uint8_t ui8_ion_active[SETTINGS_BLOCK_LENGTH];
+static uint8_t ui8_ion_staging[SETTINGS_BLOCK_LENGTH];
+uint8_t ui8_ion_assist = 0;               // assist demand of the display 0 ... 255, 0 until linked
+static uint8_t ui8_ion_stop = 0;          // ACTION MOTOR_STOP: assist 0 until the demand goes back to 0
+static uint8_t ui8_ion_reset = 0;         // reset once the answer is sent
+static uint16_t ui16_ion_ms = 0;          // free running milliseconds (TIM2: 128 us steps)
+static uint16_t ui16_ion_tim2 = 0;
+static uint16_t ui16_ion_rand = 0x1D2B;
+
+ionc_info_t ionc_info = { ION_FW_EBICS_KUNTENG, 0, ION_KT_VERSION, ION_LAYOUT_KT_V1, 1, SETTINGS_BLOCK_LENGTH,
+                          ION_CAP_PERSIST | ION_CAP_HANDOFF | ION_CAP_HALL_DETECT, ui8_ion_active, ui8_ion_staging };
+
+void ionc_port_send (const uint8_t *frame, uint8_t len)
+{
+  while (len--) { tx (*frame++); }
+}
+
+uint32_t ionc_port_random (void)
+{
+#ifdef SIMULATION
+  return 0; // the simulator test computes the AUTH answer in advance (with the fixed clock below)
+#endif
+  ui16_ion_rand = (uint16_t) ((ui16_ion_rand * 75) + 74) ^ TIM2_GetCounter () ^ ((uint16_t) TIM1->CNTRL << 8);
+  return ((uint32_t) ui16_ion_rand << 16) | (uint16_t) (ui16_ion_rand ^ TIM2_GetCounter () ^ ui16_ion_ms);
+}
+
+uint8_t ionc_port_source (void)
+{
+  return settings_state ();  // 0 compiled, 1 stored block, 2 stored block rejected = ION_SRC_*
+}
+
+uint8_t ionc_port_motor_stopped (void)
+{
+  return (ui16_motor_get_motor_speed_erps () == 0) && !(TIM1->BKR & TIM1_BKR_MOE);
+}
+
+void ionc_port_control (const uint8_t *req)
+{
+  uint16_t ui16_limit = ion_get16 (req + ION_TQ_SPEED_LIMIT);
+  uint8_t ui8_pct = req[ION_TQ_POWER_PCT];
+  if (!req[ION_TQ_ASSIST]) { ui8_ion_stop = 0; }
+  ui8_ion_assist = ui8_ion_stop ? 0 : req[ION_TQ_ASSIST];
+  lcd_configuration_variables.ui8_assist_level = req[ION_TQ_LEVEL]; // information (the demand is what counts)
+  if (ui16_limit == 0) { ui16_limit = kt_settings.ui8_default_max_speed; }
+  lcd_configuration_variables.ui8_max_speed = (ui16_limit > 255) ? 255 : (uint8_t) ui16_limit;
+  ui8_display_power_pct = (ui8_pct > 100) ? 100 : ui8_pct;
+  ui8_display_no_throttle = (req[ION_TQ_FLAGS] & ION_CF_NO_THROTTLE) ? 1 : 0;
+}
+
+void ionc_port_link_lost (void)
+{
+  ui8_ion_assist = 0;
+}
+
+void ionc_port_telemetry (uint8_t *r)
+{
+  uint8_t ui8_i;
+  uint8_t ui8_e = motor_controller_get_error ();
+  uint8_t ui8_state = motor_controller_get_state ();
+  uint16_t ui16_status = 0;
+  uint16_t ui16_errors = 0;
+  uint16_t ui16_duty = ui16_duty_cycle;
+  int16_t i16_current = motor_get_current_filtered_10b (); // 0.125 A
+  int32_t i32_phase;
+  float f_speed = f_wheel_speed * 100.0;
+
+  for (ui8_i = 0; ui8_i < ION_TR_LEN; ui8_i++) { r[ui8_i] = 0; }
+  ion_put16 (r + ION_TR_SPEED, (f_speed > 65534.0) ? 65534 : (uint16_t) f_speed);
+  ion_put16 (r + ION_TR_VOLTAGE, (uint16_t) ((((uint32_t) motor_get_ADC_battery_voltage_filtered ()) * 272) / 10));
+  ion_put16 (r + ION_TR_BATT_CURRENT, (uint16_t) ((i16_current * 10) / 8));
+  // phase current from the battery current: battery = phase x duty cycle (the KT measures no phase current)
+  i32_phase = ((int32_t) i16_current * 10 * 508) / 8 / ((ui16_duty < 64) ? 64 : ui16_duty);
+  if (i32_phase > 32767) { i32_phase = 32767; }
+  if (i32_phase < -32767) { i32_phase = -32767; }
+  ion_put16 (r + ION_TR_PHASE_CURRENT, (uint16_t) i32_phase);
+  r[ION_TR_MOTOR_TEMP] = 0x80;                             // no sensors
+  r[ION_TR_CTRL_TEMP] = 0x80;
+  r[ION_TR_CADENCE] = ui8_pas_cadence_rpm;
+  if (kt_settings.ui8_throttle_type == EBIKE_THROTTLE_TYPE_TORQUE_SENSOR)
+  {
+    r[ION_TR_THROTTLE] = 255;
+    ion_put16 (r + ION_TR_TORQUE, ui8_adc_throttle_value);
+  }
+  else
+  {
+    r[ION_TR_THROTTLE] = (uint8_t) (((uint16_t) ui8_throttle_value * 100) / 255);
+    ion_put16 (r + ION_TR_TORQUE, 0xFFFF);
+  }
+  r[ION_TR_ASSIST_USED] = ui8_ion_assist;
+  r[ION_TR_DUTY] = (uint8_t) (((uint32_t) ui16_duty * 100) / 508);
+
+  if (TIM1->BKR & TIM1_BKR_MOE) { ui16_status |= ION_ST_MOTOR_ON; }
+  if (ui8_state & MOTOR_CONTROLLER_STATE_BRAKE)
+  {
+    ui16_status |= ION_ST_BRAKE;
+    if (kt_settings.ui8_regen_current_a) { ui16_status |= ION_ST_REGEN; }
+  }
+  if (!ebike_app_is_throttle_released ()) { ui16_status |= ION_ST_THROTTLE; }
+  if (ui8_pas_cadence_rpm) { ui16_status |= ION_ST_PAS; }
+  if (ebike_app_cruise_control_is_set ()) { ui16_status |= ION_ST_CRUISE; }
+  if (ui8_fw_angle) { ui16_status |= ION_ST_FIELD_WEAK; }
+  if (ionc_linked ()) { ui16_status |= ION_ST_LINKED; }
+  if (ui8_ad_active) { ui16_status |= ION_ST_BUSY; }
+  ion_put16 (r + ION_TR_STATUS, ui16_status);
+
+  if (ui8_state & MOTOR_CONTROLLER_STATE_OVER_CURRENT) { ui16_errors |= ION_ER_OVERCURRENT; }
+  if (ui8_state & MOTOR_CONTROLLER_STATE_UNDER_VOLTAGE) { ui16_errors |= ION_ER_UNDERVOLTAGE; }
+  if (ui8_state & MOTOR_CONTROLLER_STATE_OVER_VOLTAGE) { ui16_errors |= ION_ER_OVERVOLTAGE; }
+  if (ui8_state & MOTOR_CONTROLLER_STATE_HALL_ERROR) { ui16_errors |= ION_ER_HALL; }
+  if (ui8_state & MOTOR_CONTROLLER_STATE_MOTOR_BLOCKED) { ui16_errors |= ION_ER_STALL; }
+  if ((ui8_state & MOTOR_CONTROLLER_STATE_THROTTLE_ERROR) || (ui8_e == MOTOR_CONTROLLER_ERROR_01_THROTTLE)) { ui16_errors |= ION_ER_THROTTLE; }
+  if (ui8_phase_fault) { ui16_errors |= ION_ER_PHASE; }
+  if (settings_state () == 2) { ui16_errors |= ION_ER_SETTINGS; }
+  ion_put16 (r + ION_TR_ERRORS, ui16_errors);
+  // the KT codes are already the hex style codes of the displays (0x21 ...); under voltage = the battery symbol
+  r[ION_TR_ERROR_CODE] = (ui8_e == MOTOR_CONTROLLER_ERROR_91_BATTERY_UNDER_VOLTAGE) ? 0 : ui8_e;
+  if (!r[ION_TR_ERROR_CODE] && ui8_phase_fault) { r[ION_TR_ERROR_CODE] = 0x23; }
+}
+
+uint8_t ionc_port_apply (uint8_t mode)
+{
+  uint8_t ui8_i;
+  if (mode & ION_APPLY_LIVE) { return ION_E_UNSUPPORTED; } // all values are derived at boot
+  if (!settings_check (ui8_ion_staging)) { return ION_E_INVALID; }
+  // writing the EEPROM blocks the main loop (current control) for up to 0.2 s: only with the motor stopped
+  if ((mode & ION_APPLY_PERSIST) && !ionc_port_motor_stopped ()) { return ION_E_BUSY; }
+  if (mode & ION_APPLY_PERSIST)
+  {
+    eeprom_write_bytes (SETTINGS_BLOCK_ADDRESS, ui8_ion_staging, SETTINGS_BLOCK_LENGTH);
+    for (ui8_i = 0; ui8_i < SETTINGS_BLOCK_LENGTH; ui8_i++)
+    {
+      if (*((volatile uint8_t *) (SETTINGS_BLOCK_ADDRESS + ui8_i)) != ui8_ion_staging[ui8_i]) { return ION_E_FAILED; }
+      ui8_ion_active[ui8_i] = ui8_ion_staging[ui8_i];
+    }
+  }
+  if (mode & ION_APPLY_REBOOT) { ui8_ion_reset = 1; }
+  return ION_OK;
+}
+
+uint8_t ionc_port_action (uint8_t action, const uint8_t *arg)
+{
+  (void) arg;
+  switch (action)
+  {
+    case ION_ACT_REBOOT:
+    if (!ionc_port_motor_stopped ()) { return ION_E_BUSY; }
+    ui8_ion_reset = 1;
+    return ION_OK;
+
+    case ION_ACT_HALL_DETECT:
+    if (!ionc_port_motor_stopped () || ui8_ad_active) { return ION_E_BUSY; }
+    ui8_ad_cmd = 1;                                        // runs from the main loop (motor_autodetect)
+    return ION_OK;
+
+    case ION_ACT_CLEAR_ERRORS:
+    motor_controller_clear_error ();
+    return ION_OK;
+
+    case ION_ACT_MOTOR_STOP:
+    ui8_ion_stop = 1;
+    ui8_ion_assist = 0;
+    return ION_OK;
+  }
+  return ION_E_RANGE;
+}
+
+static void ionrise_poll (void)
+{
+  uint16_t ui16_now = TIM2_GetCounter ();
+  uint16_t ui16_d = ui16_now - ui16_ion_tim2;
+  ui16_ion_ms += ui16_d >> 3;                              // 8 x 128 us = 1.024 ms, close enough
+#ifdef SIMULATION
+  ui16_ion_ms = 0;
+#endif
+  ui16_ion_tim2 += ui16_d & 0xFFF8;
+  while (rx_count ())
+  {
+    ionc_rx_byte (rx_peek (0));
+    rx_drop (1);
+    ionc_service (ui16_ion_ms); // a complete frame is answered at once, before the next one arrives
+  }
+  ionc_service (ui16_ion_ms);   // link supervision
+  if (ui8_ion_reset && !ui8_tx_busy)
+  {
+    // the answer is out: restart with the new block (window watchdog: WDGA with T6 = 0 resets at once)
+    WWDG->CR = 0x80;
+  }
+}
+
+int16_t display_assist (void)
+{
+  return (kt_settings.ui8_display == DISPLAY_IONRISE) ? (int16_t) ui8_ion_assist : -1;
+}
+
 // ------------------------------------------------------------------------------------------- dispatch
 uint32_t display_baudrate (void)
 {
@@ -774,6 +984,22 @@ void display_init (void)
 {
   if (kt_settings.ui8_display != DISPLAY_KT) { use_default_lcd_values (); }
   if (kt_settings.ui8_display == DISPLAY_VESC) { lcd_configuration_variables.ui8_assist_level = 3; } // no levels from VESC devices
+  if (kt_settings.ui8_display == DISPLAY_IONRISE)
+  {
+    settings_pack (ui8_ion_active);
+    ionc_info.hw = kt_settings.ui8_controller_type;
+    if (kt_settings.ui8_throttle_type == EBIKE_THROTTLE_TYPE_TORQUE_SENSOR) { ionc_info.caps |= ION_CAP_TORQUE; }
+    else { ionc_info.caps |= ION_CAP_THROTTLE; }
+    if (kt_settings.ui8_regen_current_a) { ionc_info.caps |= ION_CAP_REGEN; }
+    if (kt_settings.ui8_fw_angle_deg) { ionc_info.caps |= ION_CAP_FIELD_WEAK; }
+    ionc_init ();
+    lcd_configuration_variables.ui8_assist_level = 0;
+    // the wheel and the speed limit of the settings block (the IONRISE display sends the speed limit, the
+    // controller computes the speed: the values a KT display left in the EEPROM do not count)
+    lcd_configuration_variables.ui8_wheel_size = kt_settings.ui8_default_wheel_size;
+    lcd_configuration_variables.ui8_max_speed = kt_settings.ui8_default_max_speed;
+    ui16_ion_tim2 = TIM2_GetCounter ();
+  }
   UART2->CR2 |= UART2_CR2_RIEN;
 }
 
@@ -789,6 +1015,7 @@ void display_poll (void)
     case DISPLAY_TONGSHENG: ts_poll (); break;
     case DISPLAY_VESC: vesc_poll (); break;
     case DISPLAY_EBICS: ebics_poll (); break;
+    case DISPLAY_IONRISE: ionrise_poll (); break;
     default: kt_poll (); break;
   }
 }

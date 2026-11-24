@@ -33,6 +33,8 @@ const displays = [
   DisplayType('VESC', 'VESC UART (115200 baud) (new)',
       'Live data for VESC displays and apps (via a UART-BLE bridge). Not a full VESC: no VESC Tool configuration.'),
   DisplayType('EBICS', 'EBiCS app / BLE module', 'For the EBiCS Flutter app with the EBiCS BLE module.'),
+  DisplayType('IONRISE', 'IONRISE display (iondisp)',
+      'IONRISE display: 3 to 9 levels set on the display, full live values, the display reads and changes these settings.'),
 ];
 
 const wheels = <(String, int?)>[

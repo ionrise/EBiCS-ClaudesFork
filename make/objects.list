@@ -22,6 +22,7 @@
 "Src/display_No_2.o"
 "Src/display_tongsheng.o"
 "Src/display_vesc.o"
+"Src/display_ionrise.o"
 "Src/eeprom.o"
 "Src/main.o"
 "Src/sensorless.o"

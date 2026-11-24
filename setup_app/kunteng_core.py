@@ -32,7 +32,8 @@ CHOICES = {
     "display": [("Kunteng KT-LCD3 / LCD5 / LCD8", 0), ("KingMeter 901U / KM5S", 1), ("Bafang LCD (1200 baud)", 2),
                 ("Bafang 850C / 860C (9600 baud)", 3), ("KingMeter J-LCD / 618U", 4),
                 ("UART No.2 (S866, EN06 ...)", 5), ("Tongsheng VLCD5 / VLCD6 / XH18", 6),
-                ("VESC UART (115200 baud)", 7), ("EBiCS app / BLE module", 8)],
+                ("VESC UART (115200 baud)", 7), ("EBiCS app / BLE module", 8),
+                ("IONRISE display (iondisp)", 9)],
 }
 
 FIELDS = [
@@ -43,7 +44,8 @@ FIELDS = [
      "Display protocol. KT-LCD3/5/8 use the Kunteng protocol. Multi protocol displays: set the same protocol "
      "in the display menu. Other displays: assist levels are mapped to the 5 levels below; walk assist and "
      "lights are not available on KT. VESC: live values and current commands for VESC displays / apps (assist "
-     "level 3). EBiCS: the EBiCS app with the BLE module."),
+     "level 3). EBiCS: the EBiCS app with the BLE module. IONRISE: the iondisp display (3 to 9 levels set on the "
+     "display, full live values, the display can read and change these settings)."),
     ("cells", "Battery cells in series", "int", 10, "basic", "S",
      "7S = 24 V, 10S = 36 V, 13S = 48 V, 14S = 52 V. Sets the low voltage cutoff (3.0 V per cell) and the battery bars."),
     ("motor_current_a", "Max motor current", "int", 15, "basic", "A",

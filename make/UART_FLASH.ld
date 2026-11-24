@@ -142,6 +142,15 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM
 
+  /* not cleared at start up: RAM hand-off of the IONRISE display through a software reset */
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.noinit)
+    *(.noinit*)
+    . = ALIGN(4);
+  } >RAM
+
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack :
   {

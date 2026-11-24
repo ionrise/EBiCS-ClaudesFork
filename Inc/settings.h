@@ -85,9 +85,11 @@ typedef struct {
 } ebics_settings_t;
 
 extern ebics_settings_t RS;                      // the settings in use (RAM copy)
-extern volatile uint8_t ui8_settings_source;     // 0 = config.h, 1 = flash block, 2 = flash block rejected (config.h used)
+extern volatile uint8_t ui8_settings_source;     // 0 = config.h, 1 = flash block, 2 = flash block rejected (config.h used),
+                                                 // 3 = handed over by the IONRISE display
 
 void settings_load(void);
+uint8_t settings_check(const ebics_settings_t *f);   // 1 = valid block (the boot check)
 uint32_t settings_crc32(const uint8_t *data, uint32_t len);
 uint8_t assist_from_level(uint8_t ui8_level);     // display level 1..5 -> 0..255 (RS.assist_pct)
 

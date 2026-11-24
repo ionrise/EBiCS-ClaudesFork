@@ -84,6 +84,10 @@
 #include "display_vesc.h"
 #endif
 
+#if (DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+#include "display_ionrise.h"
+#endif
+
 #ifdef SENSORLESS
 #include "sensorless.h"
 #endif
@@ -380,6 +384,7 @@ void bafang_update(void);
 #endif
 
 static void dyn_adc_state(q31_t angle);
+uint32_t isqrt32(uint32_t x);
 static void set_inj_channel(char state);
 void get_standstill_position();
 void svpwm(q31_t q31_u_alpha, q31_t q31_u_beta);
@@ -607,6 +612,9 @@ int main(void)
 	Vesc_Init(&VESC);
 	MS.assist_level = 153; //no assist level from VESC devices: PAS at level 3 of 5
 #endif
+#if (DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+	Ionrise_Init();
+#endif
 	TIM1->CCR1 = 1023; //set initial PWM values
 	TIM1->CCR2 = 1023;
 	TIM1->CCR3 = 1023;
@@ -815,6 +823,9 @@ int main(void)
 #endif
 			ui8_UART_flag=0;
 		}
+#if (DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+		Ionrise_Service(); //every pass: frames are answered within 20 ms, and the link timeout needs the clock
+#endif
 
 
 		//process regualr ADC
@@ -903,8 +914,8 @@ int main(void)
 		//next priority: undervoltage protection
 		else if(MS.Voltage*CAL_V<RS.battery_voltage_min)int32_temp_current_target=0; //below cutoff: off (soft ramp above, see below)
 		//next priority: push assist
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KUNTENG)
-		else if(ui8_Push_Assist_flag){int32_temp_current_target=(RS.pushassist_current);} //Kunteng: walk assist = level 6, sets ui8_Push_Assist_flag
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KUNTENG || DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+		else if(ui8_Push_Assist_flag){int32_temp_current_target=(RS.pushassist_current);} //Kunteng: walk assist = level 6, IONRISE: walk flag
 #else
 		else if(ui8_Push_Assist_flag)int32_temp_current_target=(MS.assist_level*RS.pushassist_current)>>8; //does not work for BAFANG
 #endif
@@ -934,7 +945,7 @@ int main(void)
 				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, (RS.ph_current_max*(int32_t)(MS.assist_level-1))>>2, 0); // level in range 1...5
 #endif
 
-#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U||DISPLAY_TYPE == DISPLAY_TYPE_NO2||DISPLAY_TYPE == DISPLAY_TYPE_TONGSHENG||DISPLAY_TYPE == DISPLAY_TYPE_VESC)
+#if (DISPLAY_TYPE == DISPLAY_TYPE_KINGMETER_901U||DISPLAY_TYPE == DISPLAY_TYPE_NO2||DISPLAY_TYPE == DISPLAY_TYPE_TONGSHENG||DISPLAY_TYPE == DISPLAY_TYPE_VESC||DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
 				uint16_mapped_PAS = map(uint32_PAS, RS.ramp_end, RS.pas_timeout, ((RS.ph_current_max*(int32_t)(MS.assist_level)))>>8, 0); // level in range 0...255
 #endif
 
@@ -1028,6 +1039,9 @@ int main(void)
 				if(!brake_flag) int32_temp_current_target=VESC.current_target;
 			}
 			else VESC.cmd_active=0;
+#endif
+#if (DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+			if(ION.power_pct<100 && int32_temp_current_target>0) int32_temp_current_target=(int32_temp_current_target*ION.power_pct)/100; //power limit of the display
 #endif
 			//soft ramp down of the motor current when the battery voltage approaches the cutoff (all modes: PAS, throttle, push, VESC, display)
 			if(!brake_flag && int32_temp_current_target>0){
@@ -1718,7 +1732,7 @@ int main(void)
 
 		huart1.Instance = USART1;
 
-#if ((DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER) ||DISPLAY_TYPE==DISPLAY_TYPE_KUNTENG||DISPLAY_TYPE==DISPLAY_TYPE_EBiCS||DISPLAY_TYPE==DISPLAY_TYPE_NO2 || DISPLAY_TYPE==DISPLAY_TYPE_BAFANG_850_860 || DISPLAY_TYPE==DISPLAY_TYPE_TONGSHENG)
+#if ((DISPLAY_TYPE & DISPLAY_TYPE_KINGMETER) ||DISPLAY_TYPE==DISPLAY_TYPE_KUNTENG||DISPLAY_TYPE==DISPLAY_TYPE_EBiCS||DISPLAY_TYPE==DISPLAY_TYPE_NO2 || DISPLAY_TYPE==DISPLAY_TYPE_BAFANG_850_860 || DISPLAY_TYPE==DISPLAY_TYPE_TONGSHENG || DISPLAY_TYPE==DISPLAY_TYPE_IONRISE)
 		huart1.Init.BaudRate = 9600;
 #elif (DISPLAY_TYPE == DISPLAY_TYPE_VESC)
 		huart1.Init.BaudRate = 115200;
@@ -2241,6 +2255,9 @@ int main(void)
 #if (DISPLAY_TYPE == DISPLAY_TYPE_VESC)
 	Vesc_Init(&VESC);
 	MS.assist_level = 153; //no assist level from VESC devices: PAS at level 3 of 5
+#endif
+#if (DISPLAY_TYPE == DISPLAY_TYPE_IONRISE)
+	Ionrise_Init();
 #endif
 	}
 
@@ -2771,16 +2788,7 @@ int main(void)
 	volatile uint8_t ui8_pid_rotate = 0;     // FOC interrupt: turn q31_teta_obs by i32_pid_step per cycle
 	volatile int32_t i32_pid_step = 0;
 
-	static uint32_t pid_isqrt(uint32_t x) {
-		uint32_t r = 0, b = 1UL << 30;
-		while (b > x) b >>= 2;
-		while (b) {
-			if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
-			else r >>= 1;
-			b >>= 2;
-		}
-		return r;
-	}
+#define pid_isqrt isqrt32
 
 	static uint8_t pid_wait(uint16_t ms) { // 1 = aborted (brake, over current)
 		while (ms--) {
@@ -2973,6 +2981,18 @@ int main(void)
 		return RS.wheel_circumference*8*360/(RS.pulses_per_revolution*tics);
 	}
 
+	//floor(sqrt(x)), bit by bit (16 steps)
+	uint32_t isqrt32(uint32_t x) {
+		uint32_t r = 0, b = 1UL << 30;
+		while (b > x) b >>= 2;
+		while (b) {
+			if (x >= r + b) { x -= r + b; r = (r >> 1) + b; }
+			else r >>= 1;
+			b >>= 2;
+		}
+		return r;
+	}
+
 	void runPIcontrol(){
 
 		// battery current from the active power P ~ u_q*i_q - u_d*i_d (firmware frame).
@@ -3084,8 +3104,8 @@ int main(void)
 
 		//limit voltage in rotating frame, refer chapter 4.10.1 of UM1052
 		//MS.u_abs = (q31_t)hypot((double)q31_u_d_temp, (double)q31_u_q_temp); //absolute value of U in static frame
-		arm_sqrt_q31((q31_u_d_temp*q31_u_d_temp+q31_u_q_temp*q31_u_q_temp)<<1,&MS.u_abs);
-		MS.u_abs = (MS.u_abs>>16)+1;
+		//integer square root: the same result as arm_sqrt_q31(S<<1)>>16, which pulled in 1.2 KB of soft float
+		MS.u_abs = isqrt32((uint32_t)(q31_u_d_temp*q31_u_d_temp+q31_u_q_temp*q31_u_q_temp))+1;
 		i32_u_demand16 += MS.u_abs - (i32_u_demand16 >> 4); //voltage asked for, before the limit (~1 ms low pass)
 
 

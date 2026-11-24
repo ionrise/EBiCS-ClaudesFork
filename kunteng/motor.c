@@ -1103,7 +1103,10 @@ void motor_fast_controller (void)
   calc_speed_and_emf ();
 
   ui16_target_current = soft_speed_limit (ui16_target_current_10b);
-  do_coasting (ui16_target_current);
+  // coasting only when no current is requested at all, not at the speed limit: there the soft limit asks for 0 A
+  // and the PWM went off, the motor (no load, on the table) slowed down, the PWM came back on, it sped up to the
+  // limit and was cut again - "runs up to speed, stops without an error, starts again"
+  do_coasting (ui16_target_current_10b);
 
 #if defined (EBIKE_THROTTLE_TYPE_THROTTLE_PAS_PWM_DUTY_CYCLE)
   ui16_target = ui16_pwm_duty_cycle_duty_cycle_controller;
@@ -1299,6 +1302,11 @@ void motor_controller_reset_state (uint8_t ui8_state)
   ui8_motor_controller_state &= ~ui8_state;
 }
 
+uint8_t motor_controller_get_state (void)
+{
+  return ui8_motor_controller_state;
+}
+
 uint8_t motor_controller_state_is_set (uint8_t ui8_state)
 {
   return ui8_motor_controller_state & ui8_state;
@@ -1435,6 +1443,15 @@ uint16_t motor_speed_controller (void)
 
   i16_output = (int16_t) ui16_duty_cycle + i16_output;
   if (i16_output > PWM_DUTY_MAX) i16_output = PWM_DUTY_MAX;
+  // not far below the back-EMF: there the motor brakes hard into its windings (a light motor overshot the
+  // limit, the duty cycle went down to 0 and the motor stopped dead). 7/8 of the back-EMF = mild braking only.
+  if (ui16_emf_duty_per_erps_x256)
+  {
+    int16_t i16_floor = (int16_t) (((uint32_t) ui16_motor_speed_erps * ui16_emf_duty_per_erps_x256) >> 8);
+    i16_floor -= i16_floor >> 3;
+    if (i16_floor > PWM_DUTY_MAX) i16_floor = PWM_DUTY_MAX;
+    if (i16_output < i16_floor) i16_output = i16_floor;
+  }
   if (i16_output < 0) i16_output = 0;
   return (uint16_t) i16_output;
 }

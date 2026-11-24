@@ -16,7 +16,7 @@ SPL = ["itc", "clk", "iwdg", "gpio", "exti", "uart2", "tim1", "tim2", "adc1", "f
 APP = ["watchdog", "gpio", "utils", "uart", "adc", "brake", "pas", "timers", "pwm", "eeprom",
        "motor", "ebike_app", "wheel_speed_sensor", "settings", "display"]
 
-CFLAGS = ["-mstm8", "--std-c99", "--opt-code-size", "-Ddouble=float"]
+CFLAGS = ["-mstm8", "--std-c99", "--opt-code-size", "-Ddouble=float", "-DIONC_INFO_CONST="]
 
 
 def find_sdcc():
@@ -37,10 +37,12 @@ def build(out_dir=None, defines=(), log=print):
     env["PATH"] = os.path.dirname(sdcc) + os.pathsep + env.get("PATH", "")  # sdcpp needs cc1 next to it
     out_dir = os.path.abspath(out_dir or os.path.join(HERE, "build"))
     os.makedirs(out_dir, exist_ok=True)
-    inc = ["-I" + os.path.join(HERE, "StdPeriphLib", "inc"), "-I" + HERE]
+    ion = os.path.join(os.path.dirname(HERE), "ionrise")  # IONRISE display protocol, shared with iondisp / Lishui
+    inc = ["-I" + os.path.join(HERE, "StdPeriphLib", "inc"), "-I" + HERE, "-I" + ion]
     defs = [d if d.startswith("-D") else "-D" + d for d in defines]
     srcs = [os.path.join(HERE, "StdPeriphLib", "src", "stm8s_%s.c" % s) for s in SPL] + \
-           [os.path.join(HERE, a + ".c") for a in APP]
+           [os.path.join(HERE, a + ".c") for a in APP] + \
+           [os.path.join(ion, "ionproto.c"), os.path.join(ion, "ionctrl.c")]
     rels = []
     for src in srcs:
         rel = os.path.join(out_dir, os.path.splitext(os.path.basename(src))[0] + ".rel")

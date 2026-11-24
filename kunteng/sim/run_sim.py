@@ -24,6 +24,8 @@ sys.path.insert(0, FW)
 sys.path.insert(0, os.path.join(os.path.dirname(FW), "setup_app"))
 import build  # noqa: E402
 import kunteng_core as kt  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(FW), "ionrise"))
+import ionproto as ion  # noqa: E402
 
 PWM_HZ = 15625
 CPU_HZ = 16_000_000
@@ -538,6 +540,67 @@ def main():
           all(abs(p[8] - vb * 1.088) <= 4 for p in pages if p[3] == 4),
           "pages 1 and 4 in turn, XOR ok, level 4, battery in 0.25 V (%d pages, %s, ADC %d)"
           % (len(pages), [p[8] for p in pages if p[3] == 4], vb), fails)
+
+    # ---------------------------------------------------------------- IONRISE display
+    print("IONRISE display: handshake, telemetry, settings read / write / apply")
+
+    def ion_frames(out):
+        """complete, CRC-correct frames in the firmware's output: list of (cmd, seq, payload)"""
+        out = out.replace(b"\r\n", b"\n")   # ucsim writes 0x0A as 0x0D 0x0A (the frames here have no real 0x0D)
+        res, i = [], 0
+        while i + 6 <= len(out):
+            n = out[i + 1]
+            if out[i] == 0xA5 and 2 <= n <= 66 and i + n + 4 <= len(out):
+                c = ion.crc16(out[i + 1:i + n + 2])
+                if out[i + n + 2] == (c & 0xFF) and out[i + n + 3] == (c >> 8):
+                    res.append((out[i + 2], out[i + 3], out[i + 4:i + n + 2]))
+                    i += n + 4
+                    continue
+            i += 1
+        return res
+
+    hello = ion.build(0x01, 1, bytes([1, 0, 1, 0]) + (0x12345678).to_bytes(4, "little") + bytes([0, 1]))
+    blk = kt.settings_block(dict(kt.default_settings(), display=9))
+    # the SIMULATION build has a fixed clock and random value: the controller's nonce = the display's nonce
+    nonce_c = 0x12345678
+    auth = ion.build(0x02, 2, ion.proof(nonce_c, 1).to_bytes(2, "little") + bytes([1]))
+    telem = ion.build(0x10, 3, bytes([200, 4, 5, 0, 30, 0, 50, 0]))            # assist 200, 30 km/h, 50 %
+    rd = ion.build(0x20, 4, bytes([0, 0, 0, 32]))                                 # read the active block
+    new = bytearray(blk)
+    new[5] = 12                                                                   # motor current 12 A
+    new[31] = (~sum(new[:31])) & 0xFF
+    wr = ion.build(0x21, 5, bytes([4, 0]) + bytes(new[4:31 + 1]))
+    bad = ion.build(0x21, 6, bytes([31, 0, new[31] ^ 0x55]))                      # wrong checksum
+    ap_bad = ion.build(0x22, 7, bytes([2]))
+    fix = ion.build(0x21, 8, bytes([31, 0, new[31]]))
+    ap = ion.build(0x22, 9, bytes([2]))                                           # PERSIST (no reboot here)
+    _res, out = display_run(ihx, syms, 9, [hello, auth, telem, rd, wr, bad, ap_bad, fix, ap], extra_ms=100,
+                            dumps=[("assist", "ui8_ion_assist", 1), ("pct", "ui8_display_power_pct", 1),
+                                   ("vbat", syms["ui8_adc_battery_voltage_filtered"[:31]], 1)])
+    fr = {f[1]: f for f in ion_frames(out)}
+    h = fr.get(1, (0, 0, b""))[2]
+    check(len(h) == 20 and h[2] == 2 and h[6] == 2 and h[8] == 32 and
+          int.from_bytes(h[14:16], "little") == ion.proof(0x12345678, 2) and
+          int.from_bytes(h[16:20], "little") == nonce_c,
+          "HELLO answer: Kunteng, KT layout, 32 bytes, proof correct (%s)" % h.hex(), fails)
+    a = fr.get(2, (0, 0, b""))[2]
+    check(a == b"\0", "AUTH accepted (%s)" % a.hex(), fails)
+    tr = fr.get(3, (0, 0, b""))[2]
+    check(fr.get(3, (0,))[0] == 0x90 and len(tr) == 22 and (int.from_bytes(tr[16:18], "little") & (1 << 12)) and
+          tr[14] == 200, "TELEMETRY answer: 22 bytes, LINKED, assist used 200 (%s)" % tr.hex(), fails)
+    v = int.from_bytes(tr[2:4], "little") if len(tr) == 22 else 0
+    vb = _res.get("vbat", b"\0")[0]
+    check(abs(v - vb * 27.2) < 30, "voltage %d x 0.01 V = battery ADC %d x 0.272 V" % (v, vb), fails)
+    check(_res.get("assist", b"\0")[:1] == bytes([200]) and _res.get("pct", b"\0")[:1] == bytes([50]),
+          "assist demand 200 and power limit 50 %% in use (%s %s)" % (list(_res.get("assist", b"")),
+                                                                   list(_res.get("pct", b""))), fails)
+    r = fr.get(4, (0, 0, b""))[2]
+    check(r[:3] == b"\0\0\0" and bytes(r[3:]) == bytes(blk), "SET_READ: the active block (%s)" % r.hex(), fails)
+    check(fr.get(5, (0, 0, b"x"))[2] == b"\0" and fr.get(7, (0, 0, b""))[2] == bytes([5]),
+          "SET_WRITE ok, APPLY with a wrong checksum -> INVALID (%s)" % fr.get(7, (0, 0, b""))[2].hex(), fails)
+    # ucsim's flash controller never reports the end of an EEPROM write: PERSIST may hang in the simulation,
+    # so only check that it was accepted up to the write (no INVALID answer)
+    check(fr.get(9, (0, 0, b""))[2] != bytes([5]), "APPLY of the corrected block not rejected", fails)
 
     # ---------------------------------------------------------------- 7: learned values from the EEPROM
     print("learned hall offsets and back-EMF constant loaded at power on")

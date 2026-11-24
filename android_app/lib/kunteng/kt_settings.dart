@@ -37,6 +37,7 @@ const ktChoices = <String, List<(String, int)>>{
     ('Tongsheng VLCD5 / VLCD6 / XH18', 6),
     ('VESC UART (115200 baud)', 7),
     ('EBiCS app / BLE module', 8),
+    ('IONRISE display (iondisp)', 9),
   ],
 };
 
@@ -58,7 +59,8 @@ const ktFields = <KtField>[
     help:
         'Display protocol. Multi protocol displays: set the same in the display menu. Other displays: assist '
         'levels are mapped to the 5 levels, no walk assist or lights on KT. VESC: live values and current '
-        'commands (assist level 3). EBiCS: the EBiCS app with the BLE module.',
+        'commands (assist level 3). EBiCS: the EBiCS app with the BLE module. IONRISE: the iondisp display '
+        '(levels set on the display, full live values, the display can change these settings).',
   ),
   KtField(
     'cells',

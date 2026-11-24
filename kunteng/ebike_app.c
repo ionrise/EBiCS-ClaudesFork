@@ -317,6 +317,10 @@ void set_motor_controller_max_current (uint8_t ui8_controller_max_current)
   }
 
   ui16_motor_controller_max_current_10b = (uint16_t) (((float) (kt_settings.ui8_motor_current_a * 8)) * f_controller_max_current);
+  if (ui8_display_power_pct < 100) // power limit of the display (IONRISE)
+  {
+    ui16_motor_controller_max_current_10b = (uint16_t) (((uint32_t) ui16_motor_controller_max_current_10b * ui8_display_power_pct) / 100);
+  }
 }
 
 struc_lcd_configuration_variables *ebike_app_get_lcd_configuration_variables (void)
@@ -420,10 +424,13 @@ void ebike_throotle_type_throotle_pas (void)
 
   ui8_temp = ui8_max (ui8_throttle_value_filtered, ui8_temp); // use the max value from throotle or pas cadence
 
-  // scale with assist level value
-  f_temp = assist_level_factor (lcd_configuration_variables.ui8_assist_level);
-
-  f_temp = (float) (((float) ui8_temp) * ((float) lcd_configuration_variables.ui8_assist_level) * f_temp);
+  // scale with assist level value (IONRISE: the display sends the assist demand 0 ... 255 itself)
+  if (display_assist () >= 0) { f_temp = (float) ui8_temp * ((float) display_assist () * (1.0 / 255.0)); }
+  else
+  {
+    f_temp = assist_level_factor (lcd_configuration_variables.ui8_assist_level);
+    f_temp = (float) (((float) ui8_temp) * ((float) lcd_configuration_variables.ui8_assist_level) * f_temp);
+  }
 
   // map to motor controller current
   ui16_temp = (uint16_t) (map ((uint32_t) f_temp,
@@ -462,6 +469,7 @@ void ebike_throotle_type_torque_sensor (void)
   uint16_t ui16_target_speed_erps;
 
   f_temp = assist_level_factor (lcd_configuration_variables.ui8_assist_level);
+  if (display_assist () >= 0) { f_temp = (float) display_assist () * (1.0 / 255.0); } // IONRISE demand
 
   f_temp = (float) (((float) ui8_throttle_value_filtered) * (f_temp / 2.0));
 
@@ -527,7 +535,7 @@ void read_throotle (void)
   {
     if (--ui8_throttle_error_counter == 0) { motor_controller_clear_error (); }
   }
-  if (ui8_throttle_error_counter)
+  if (ui8_throttle_error_counter || ui8_display_no_throttle)
   {
     ui8_adc_throttle_value = 0;
     ui16_throttle_value_accumulated = 0;

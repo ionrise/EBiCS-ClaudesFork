@@ -138,6 +138,8 @@ DISPLAYS = [
     ("VESC", "DISPLAY_TYPE_VESC", "VESC UART (115200 baud)  (new)",
      "Live data for VESC displays and apps (via a UART-BLE bridge). Not a full VESC: no VESC Tool configuration."),
     ("EBICS", "DISPLAY_TYPE_EBiCS", "EBiCS app / BLE module", "For the EBiCS Flutter app with the EBiCS BLE module."),
+    ("IONRISE", "DISPLAY_TYPE_IONRISE", "IONRISE display (iondisp)",
+     "IONRISE display: 3 to 9 levels set on the display, full live values, the display reads and changes these settings."),
 ]
 
 WHEELS = [("16\"", 1270), ("20\"", 1590), ("24\"", 1900), ("26\"", 2070), ("27.5\"", 2200),
@@ -419,6 +421,7 @@ def generate_config_h(s):
          "#define DISPLAY_TYPE_NO2 (1<<7)              // China protocol 'No_2', e.g. S866",
          "#define DISPLAY_TYPE_TONGSHENG (1<<8)        // Tongsheng VLCD5 / VLCD6 / XH18",
          "#define DISPLAY_TYPE_VESC (1<<9)             // VESC UART protocol",
+         "#define DISPLAY_TYPE_IONRISE (1<<10)         // IONRISE display (iondisp)",
          "#define DISPLAY_TYPE_BAFANG         (DISPLAY_TYPE_BAFANG_LCD|DISPLAY_TYPE_BAFANG_850_860)",
          "#define DISPLAY_TYPE_KINGMETER      (DISPLAY_TYPE_KINGMETER_618U|DISPLAY_TYPE_KINGMETER_901U)",
          "#define EXTERNAL 1", "#define INTERNAL 0", ""]

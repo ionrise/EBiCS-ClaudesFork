@@ -217,8 +217,7 @@ class Firmware:
         self.pi_id.setpoint = self.i_d_setpoint + self.fw_id
         ud = -PI_control(self.pi_id)
         s = w32(w32(ud * ud, "u_d^2") + w32(uq * uq, "u_q^2"), "u_d^2+u_q^2")
-        s = w32(s << 1, "(u_d^2+u_q^2)<<1")
-        self.u_abs = asr(sqrt_q31(s), 16) + 1
+        self.u_abs = math.isqrt(s & 0xFFFFFFFF) + 1     # isqrt32 in Src/main.c (was arm_sqrt_q31(s << 1) >> 16)
         self.u_demand16 += self.u_abs - (self.u_demand16 >> 4)
         if self.u_abs > U_MAX:
             self.u_q = cdiv(w32(uq * U_MAX, "u_q*_U_MAX"), self.u_abs)

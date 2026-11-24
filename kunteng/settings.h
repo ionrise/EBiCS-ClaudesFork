@@ -14,7 +14,7 @@
  *   4  battery cells             20 wheel size default (KT display code)
  *   5  motor current (A)         21 controller type (1 = S06S, 2 = S12S)
  *   6  regen current (A)         22 phase current factor (x10, phase limit = factor * motor current)
- *   7  throttle type (1/2)       23 display protocol (display.h, 0 = Kunteng)
+ *   7  throttle type (1/2)       23 display protocol (display.h, 0 = Kunteng, 9 = IONRISE)
  *   8  flags (KT_FLAG_*)         24 power ramp: time 0 -> full duty cycle (x0.1 s, 0 = default)
  *   9  PAS magnets               25 FOC current sample delay compensation (int8, x4 us, 0 = off)
  *   10 cadence for full PAS      26 motor characteristic for non-KT displays (KT display P1, 0 = 202)
@@ -91,5 +91,8 @@ extern struct_kt_settings kt_settings;
 
 void settings_init (void); // call before motor_init / eeprom_init
 uint8_t settings_flag (uint8_t ui8_flag);
+uint8_t settings_check (const uint8_t *p_block); // 1 = a 32 byte block in RAM passes the same checks as at boot
+uint8_t settings_state (void);                   // 0 compiled defaults, 1 EEPROM block, 2 EEPROM block rejected
+void settings_pack (uint8_t *p);                 // the block in use (32 bytes)
 
 #endif /* _SETTINGS_H_ */
