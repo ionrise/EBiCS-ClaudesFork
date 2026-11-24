@@ -601,7 +601,10 @@ void TIM1_UPD_OVF_TRG_BRK_IRQHandler(void) __interrupt(TIM1_UPD_OVF_TRG_BRK_IRQH
         ui8_half_erps_flag = 0;
         ui16_PWM_cycles_counter_total = ui16_PWM_cycles_counter;
         ui16_PWM_cycles_counter = 0;
-        ui16_motor_speed_erps = ((uint16_t) PWM_CYCLES_SECOND) / ui16_PWM_cycles_counter_total;
+        // an impossibly short revolution (hall edges right after the counter reset, e.g. while the
+        // motor only shakes at power up) gave a division by 0 = 0xFFFF erps = ~655 km/h on the display
+        ui16_motor_speed_erps = (ui16_PWM_cycles_counter_total >= 4) ?
+                                ((uint16_t) PWM_CYCLES_SECOND) / ui16_PWM_cycles_counter_total : 0;
 
         // hand one steady revolution to the hall learning in the main loop
         if ((ui8_valid_edges >= 12) && (!ui8_learn_snapshot_ready) &&
